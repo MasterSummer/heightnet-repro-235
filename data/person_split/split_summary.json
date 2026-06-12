@@ -1,0 +1,10 @@
+{
+  "scheme": "person_split",
+  "out_root": "/Users/yiding/code/gait/heightnet_data_midrun_person_split",
+  "counts": {
+    "train": 433,
+    "val": 84,
+    "test": 115
+  },
+  "total_sequences": 632
+}

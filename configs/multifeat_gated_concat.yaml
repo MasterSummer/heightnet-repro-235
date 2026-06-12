@@ -1,0 +1,68 @@
+seed: 42
+device: cuda
+data:
+  image_size: [352, 704]
+  normalize_rgb: true
+  use_pair_consistency: false
+eval:
+  frame_eval_seed: 42
+  frames_per_person_eval: 10
+  save_train_gallery: false
+  save_visualizations: false
+  video_feature_frames: 30
+  vis_limit: 20
+loss:
+  consistency_mode: map
+  eps: 1.0e-06
+  lambda_cons: 0.0
+  lambda_rank: 1.0
+  lambda_rmse: 0.0
+  min_valid_pixels: 64
+  min_valid_ratio: 0.002
+  pairwise_json: /data1/zhaoyd/jianzhi_2511_pixel_camera/2d5_0_full/pairs.json
+model:
+  base_channels: 32
+  comparator_channels: 64
+  comparator_layers: 2
+  comparator_type: resnet
+  name: derived_height_ranker
+  fusion_type: gated
+  compare_type: concat
+  use_geometry_branch: true
+  geo_feat_dim: 12
+  geo_hidden_dim: 32
+  crop_and_resize_person: true
+paths:
+  bg_depth_root: /data2/jianzhi_2511_spilt_coat/bg_depthmap
+  output_dir: /data1/zhaoyd/heightnet_repro/runs/multifeat_gated_concat
+  train_manifest: /data1/zhaoyd/jianzhi_2511_pixel_camera/2d5_0_full/train_manifest.csv
+  val_manifest: /data1/zhaoyd/jianzhi_2511_pixel_camera/2d5_0_full/val_manifest.csv
+  test_manifest: /data1/zhaoyd/jianzhi_2511_pixel_camera/2d5_0_full/test_manifest.csv
+  train_video_root: ""
+  val_video_root: ""
+  test_video_root: ""
+runtime_depth:
+  assume_inverse: true
+  checkpoint: /data1/zhaoyd/models/depth_anything_v2_vits.pth
+  depthanything_root: /data1/zhaoyd/Depth-Anything-V2
+  enabled: true
+  encoder: vits
+  input_size: 518
+runtime_seg:
+  conf: 0.25
+  enabled: true
+  imgsz: 640
+  iou: 0.7
+  model_path: /data1/zhaoyd/models/yolov8n-seg.pt
+  strict_native: true
+train:
+  batch_size: 16
+  epochs: 50
+  grad_clip_norm: 1.0
+  log_interval: 20
+  lr: 0.0001
+  num_workers: 4
+  tb_num_images: 4
+  use_amp: true
+  use_tensorboard: true
+  weight_decay: 0.0001

@@ -1,0 +1,85 @@
+from __future__ import annotations
+
+import importlib.util
+import unittest
+from pathlib import Path
+
+
+MODULE_PATH = Path(__file__).resolve().parents[1] / "tools" / "home_data_heightmap_fusion.py"
+SPEC = importlib.util.spec_from_file_location("home_data_heightmap_fusion", MODULE_PATH)
+home_data_heightmap_fusion = importlib.util.module_from_spec(SPEC)
+assert SPEC.loader is not None
+SPEC.loader.exec_module(home_data_heightmap_fusion)
+
+
+class StrictPersonSplitTest(unittest.TestCase):
+    def test_apply_person_split_reassigns_all_source_rows_without_overlap(self):
+        rows = [
+            {"split": "train", "person_id": "p1", "sequence_id": "p1__a", "video_filename": "a.mp4"},
+            {"split": "test", "person_id": "p1", "sequence_id": "p1__b", "video_filename": "b.mp4"},
+            {"split": "val", "person_id": "p2", "sequence_id": "p2__c", "video_filename": "c.mp4"},
+            {"split": "train", "person_id": "p3", "sequence_id": "p3__d", "video_filename": "d.mp4"},
+        ]
+        split = {"train": ["p1"], "val": ["p2"], "test": ["p3"]}
+
+        reassigned = home_data_heightmap_fusion.apply_person_split(rows, split)
+
+        self.assertEqual([row["sequence_id"] for row in reassigned], ["p1__a", "p1__b", "p2__c", "p3__d"])
+        self.assertEqual(
+            {row["sequence_id"]: row["split"] for row in reassigned},
+            {"p1__a": "train", "p1__b": "train", "p2__c": "val", "p3__d": "test"},
+        )
+        self.assertEqual(
+            home_data_heightmap_fusion.person_overlap_counts(split),
+            {"train_val": 0, "train_test": 0, "val_test": 0},
+        )
+
+    def test_apply_person_split_deduplicates_sequence_ids(self):
+        rows = [
+            {"split": "train", "person_id": "p1", "sequence_id": "p1__a", "video_filename": "a.mp4"},
+            {"split": "test", "person_id": "p1", "sequence_id": "p1__a", "video_filename": "a.mp4"},
+        ]
+        split = {"train": ["p1"], "val": [], "test": []}
+
+        reassigned = home_data_heightmap_fusion.apply_person_split(rows, split)
+
+        self.assertEqual([row["sequence_id"] for row in reassigned], ["p1__a"])
+        self.assertEqual(reassigned[0]["split"], "train")
+
+    def test_pair_acc_counts_treats_each_video_sequence_as_independent_sample(self):
+        ids = ["p1__cam_a", "p1__cam_b", "p2__cam_a", "p3__cam_a"]
+        scores = {"p1__cam_a": 10.0, "p1__cam_b": 9.0, "p2__cam_a": 7.0, "p3__cam_a": 8.0}
+        heights = {"p1__cam_a": 180.0, "p1__cam_b": 180.0, "p2__cam_a": 170.0, "p3__cam_a": 175.0}
+
+        metrics = home_data_heightmap_fusion.pair_acc_counts(ids, scores, heights)
+
+        self.assertEqual(metrics, {"accuracy": 1.0, "correct": 5, "total": 5})
+        self.assertEqual(home_data_heightmap_fusion.pair_acc(ids, scores, heights), 1.0)
+
+    def test_primary_metric_definition_documents_video_level_samples(self):
+        self.assertIn("one record per usable video/NPZ", home_data_heightmap_fusion.PRIMARY_METRIC_DEFINITION)
+        self.assertIn("no person-camera aggregation", home_data_heightmap_fusion.PRIMARY_METRIC_DEFINITION)
+
+    def test_near_bucket_weights_parse_and_apply_by_height_gap(self):
+        weights = home_data_heightmap_fusion.parse_near_bucket_weights("lt3=3,3to5=2,5to8=1.5,ge8=0.75")
+
+        self.assertEqual(weights, {"lt3": 3.0, "3to5": 2.0, "5to8": 1.5, "ge8": 0.75})
+        self.assertEqual(home_data_heightmap_fusion.pair_weight_for_gap(2.0, weights), 3.0)
+        self.assertEqual(home_data_heightmap_fusion.pair_weight_for_gap(4.0, weights), 2.0)
+        self.assertEqual(home_data_heightmap_fusion.pair_weight_for_gap(7.0, weights), 1.5)
+        self.assertEqual(home_data_heightmap_fusion.pair_weight_for_gap(9.0, weights), 0.75)
+
+    def test_filter_target_cameras_preserves_default_and_rejects_missing(self):
+        cameras = ["2d5_0", "2d5_30", "3d5_330"]
+
+        self.assertEqual(home_data_heightmap_fusion.filter_target_cameras(cameras, []), cameras)
+        self.assertEqual(
+            home_data_heightmap_fusion.filter_target_cameras(cameras, ["3d5_330", "2d5_0"]),
+            ["2d5_0", "3d5_330"],
+        )
+        with self.assertRaises(ValueError):
+            home_data_heightmap_fusion.filter_target_cameras(cameras, ["missing_cam"])
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,0 +1,81 @@
+seed: 42
+device: cuda
+paths:
+  train_manifest: /home/zyding/height/jianzhi_2511_first_camera_timefirst/existing_parsing_rank31_max20/prepared/train_manifest_cache_valid.csv
+  val_manifest: /home/zyding/height/jianzhi_2511_first_camera_timefirst/existing_parsing_rank31_max20/prepared/val_manifest_cache_valid.csv
+  test_manifest: /home/zyding/height/jianzhi_2511_first_camera_timefirst/existing_parsing_rank31_max20/prepared/test_manifest_cache_valid.csv
+  train_video_root: ''
+  val_video_root: ''
+  test_video_root: ''
+  bg_depth_root: /home/zyding/height/jianzhi_2511_spilt_coat/bg_depthmap
+  output_dir: /home/zyding/height/heightnet_repro/runs/jianzhi_2511_2d5_0_rank31_max20
+train:
+  epochs: 10
+  batch_size: 8
+  num_workers: 4
+  lr: 0.0001
+  weight_decay: 0.0001
+  grad_clip_norm: 1.0
+  use_amp: true
+  use_tensorboard: false
+  log_interval: 20
+  tb_num_images: 0
+loss:
+  lambda_rmse: 0.0
+  lambda_rank: 1.0
+  lambda_cons: 0.0
+  eps: 1.0e-06
+  min_valid_pixels: 64
+  min_valid_ratio: 0.002
+  pairwise_json: /home/zyding/height/jianzhi_2511_spilt_coat/all_pairs.json
+  height_labels_json: ''
+  consistency_mode: map
+  listwise_lambda: 0.0
+data:
+  image_size: [352, 704]
+  normalize_rgb: true
+  use_pair_consistency: false
+model:
+  name: derived_height_ranker
+  base_channels: 32
+  comparator_channels: 64
+  comparator_type: resnet
+  comparator_layers: 2
+  comparator_num_heads: 4
+  comparator_patch_size: 16
+  person_region_mode: mask
+  bbox_expand_ratio: 0.25
+  histogram_min: 0.0
+  histogram_max: 3.0
+  compare_type: concat
+  use_geometry_branch: true
+  geo_feat_dim: 12
+  geo_hidden_dim: 32
+  crop_and_resize_person: true
+eval:
+  save_visualizations: false
+  vis_limit: 0
+  video_feature_frames: 2
+  frames_per_person_eval: 2
+  frame_eval_seed: 42
+  save_train_gallery: false
+  validate_every_epochs: 1
+  eval_batch_size: 8
+runtime_seg:
+  enabled: true
+  model_path: /home/zyding/height/Depth-Anything-V2/yolov8n-seg.pt
+  conf: 0.25
+  iou: 0.7
+  imgsz: 640
+  strict_native: true
+  allow_inference_fallback: false
+runtime_depth:
+  enabled: true
+  depthanything_root: /home/zyding/height/Depth-Anything-V2
+  encoder: vitl
+  checkpoint: /home/zyding/height/Depth-Anything-V2/checkpoints/depth_anything_v2_vitl.pth
+  input_size: 518
+  assume_inverse: true
+  use_ground_anchor: true
+  trainable: false
+  use_depth_cache_during_train: true

@@ -1,0 +1,85 @@
+seed: 42
+device: cuda
+
+paths:
+  train_manifest: /tmp/jianzhi_smoke_train_manifest.csv
+  val_manifest: /tmp/jianzhi_smoke_val_manifest.csv
+  test_manifest: /tmp/jianzhi_smoke_test_manifest.csv
+  train_video_root: ''
+  val_video_root: ''
+  test_video_root: ''
+  bg_depth_root: /data1/dataset/jianzhi_2511_partial_5_bg_depthmap/2d5_0_200w
+  output_dir: /tmp/jianzhi_height_crop_smoke_run
+
+train:
+  epochs: 1
+  batch_size: 2
+  num_workers: 0
+  lr: 0.0001
+  weight_decay: 0.0001
+  grad_clip_norm: 1.0
+  use_amp: false
+  use_tensorboard: false
+  log_interval: 1
+  tb_num_images: 0
+
+loss:
+  lambda_rmse: 1.0
+  lambda_rank: 1.0
+  lambda_cons: 0.1
+  eps: 1.0e-06
+  min_valid_pixels: 64
+  min_valid_ratio: 0.002
+  pairwise_json: /tmp/jianzhi_smoke_pairwise.json
+  height_labels_json: /tmp/jianzhi_smoke_height_labels.json
+  consistency_mode: map
+  listwise_lambda: 0.0
+
+data:
+  image_size: [352, 704]
+  normalize_rgb: true
+  use_pair_consistency: true
+
+model:
+  name: heightnet_tiny
+  base_channels: 32
+  comparator_channels: 16
+  comparator_type: resnet
+  comparator_layers: 2
+  comparator_num_heads: 4
+  comparator_patch_size: 16
+  person_region_mode: mask
+  bbox_expand_ratio: 0.25
+  histogram_min: 0.0
+  histogram_max: 3.0
+  compare_type: concat
+  use_geometry_branch: false
+  geo_feat_dim: 5
+  geo_hidden_dim: 32
+
+eval:
+  save_visualizations: false
+  vis_limit: 0
+  video_feature_frames: 2
+  frames_per_person_eval: 2
+  frame_eval_seed: 42
+  save_train_gallery: false
+  validate_every_epochs: 1
+  eval_batch_size: 2
+
+runtime_seg:
+  enabled: true
+  model_path: /data1/zhaoyd/Depth-Anything-V2/yolov8n-seg.pt
+  conf: 0.25
+  iou: 0.7
+  imgsz: 640
+  strict_native: true
+
+runtime_depth:
+  enabled: true
+  depthanything_root: /data1/zhaoyd/Depth-Anything-V2
+  encoder: vitl
+  checkpoint: /data1/zhaoyd/Depth-Anything-V2/checkpoints/depth_anything_v2_vitl.pth
+  input_size: 518
+  assume_inverse: true
+  use_ground_anchor: true

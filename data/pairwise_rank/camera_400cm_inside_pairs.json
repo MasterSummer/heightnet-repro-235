@@ -1,0 +1,722 @@
+[
+  {
+    "id_i": "0324_man1",
+    "id_j": "0313_man2",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0324_man1",
+    "id_j": "0326_woman1",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0324_man1",
+    "id_j": "0313_man3",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0324_man1",
+    "id_j": "0319_woman2",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0324_man1",
+    "id_j": "0326_woman2",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0324_man1",
+    "id_j": "0326_woman4",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0324_man1",
+    "id_j": "0324_woman4",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0324_man1",
+    "id_j": "0327_woman1",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0324_man1",
+    "id_j": "0318_woman3",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0324_man1",
+    "id_j": "0324_woman3",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0324_man1",
+    "id_j": "0321_woman2",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0324_man1",
+    "id_j": "0320_woman3",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0324_man1",
+    "id_j": "0320_woman4",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0324_man1",
+    "id_j": "0327_woman2",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0324_man1",
+    "id_j": "0319_woman1",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0313_man2",
+    "id_j": "0326_woman1",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0313_man2",
+    "id_j": "0313_man3",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0313_man2",
+    "id_j": "0319_woman2",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0313_man2",
+    "id_j": "0326_woman2",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0313_man2",
+    "id_j": "0326_woman4",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0313_man2",
+    "id_j": "0324_woman4",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0313_man2",
+    "id_j": "0327_woman1",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0313_man2",
+    "id_j": "0318_woman3",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0313_man2",
+    "id_j": "0324_woman3",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0313_man2",
+    "id_j": "0321_woman2",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0313_man2",
+    "id_j": "0320_woman3",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0313_man2",
+    "id_j": "0320_woman4",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0313_man2",
+    "id_j": "0327_woman2",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0313_man2",
+    "id_j": "0319_woman1",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0326_woman1",
+    "id_j": "0313_man3",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0326_woman1",
+    "id_j": "0319_woman2",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0326_woman1",
+    "id_j": "0326_woman2",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0326_woman1",
+    "id_j": "0326_woman4",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0326_woman1",
+    "id_j": "0324_woman4",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0326_woman1",
+    "id_j": "0327_woman1",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0326_woman1",
+    "id_j": "0318_woman3",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0326_woman1",
+    "id_j": "0324_woman3",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0326_woman1",
+    "id_j": "0321_woman2",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0326_woman1",
+    "id_j": "0320_woman3",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0326_woman1",
+    "id_j": "0320_woman4",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0326_woman1",
+    "id_j": "0327_woman2",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0326_woman1",
+    "id_j": "0319_woman1",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0313_man3",
+    "id_j": "0319_woman2",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0313_man3",
+    "id_j": "0326_woman2",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0313_man3",
+    "id_j": "0326_woman4",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0313_man3",
+    "id_j": "0324_woman4",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0313_man3",
+    "id_j": "0327_woman1",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0313_man3",
+    "id_j": "0318_woman3",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0313_man3",
+    "id_j": "0324_woman3",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0313_man3",
+    "id_j": "0321_woman2",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0313_man3",
+    "id_j": "0320_woman3",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0313_man3",
+    "id_j": "0320_woman4",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0313_man3",
+    "id_j": "0327_woman2",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0313_man3",
+    "id_j": "0319_woman1",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0319_woman2",
+    "id_j": "0326_woman2",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0319_woman2",
+    "id_j": "0326_woman4",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0319_woman2",
+    "id_j": "0324_woman4",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0319_woman2",
+    "id_j": "0327_woman1",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0319_woman2",
+    "id_j": "0318_woman3",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0319_woman2",
+    "id_j": "0324_woman3",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0319_woman2",
+    "id_j": "0321_woman2",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0319_woman2",
+    "id_j": "0320_woman3",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0319_woman2",
+    "id_j": "0320_woman4",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0319_woman2",
+    "id_j": "0327_woman2",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0319_woman2",
+    "id_j": "0319_woman1",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0326_woman2",
+    "id_j": "0326_woman4",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0326_woman2",
+    "id_j": "0324_woman4",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0326_woman2",
+    "id_j": "0327_woman1",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0326_woman2",
+    "id_j": "0318_woman3",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0326_woman2",
+    "id_j": "0324_woman3",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0326_woman2",
+    "id_j": "0321_woman2",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0326_woman2",
+    "id_j": "0320_woman3",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0326_woman2",
+    "id_j": "0320_woman4",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0326_woman2",
+    "id_j": "0327_woman2",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0326_woman2",
+    "id_j": "0319_woman1",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0326_woman4",
+    "id_j": "0324_woman4",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0326_woman4",
+    "id_j": "0327_woman1",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0326_woman4",
+    "id_j": "0318_woman3",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0326_woman4",
+    "id_j": "0324_woman3",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0326_woman4",
+    "id_j": "0321_woman2",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0326_woman4",
+    "id_j": "0320_woman3",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0326_woman4",
+    "id_j": "0320_woman4",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0326_woman4",
+    "id_j": "0327_woman2",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0326_woman4",
+    "id_j": "0319_woman1",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0324_woman4",
+    "id_j": "0327_woman1",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0324_woman4",
+    "id_j": "0318_woman3",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0324_woman4",
+    "id_j": "0324_woman3",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0324_woman4",
+    "id_j": "0321_woman2",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0324_woman4",
+    "id_j": "0320_woman3",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0324_woman4",
+    "id_j": "0320_woman4",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0324_woman4",
+    "id_j": "0327_woman2",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0324_woman4",
+    "id_j": "0319_woman1",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0327_woman1",
+    "id_j": "0318_woman3",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0327_woman1",
+    "id_j": "0324_woman3",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0327_woman1",
+    "id_j": "0321_woman2",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0327_woman1",
+    "id_j": "0320_woman3",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0327_woman1",
+    "id_j": "0320_woman4",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0327_woman1",
+    "id_j": "0327_woman2",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0327_woman1",
+    "id_j": "0319_woman1",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0318_woman3",
+    "id_j": "0324_woman3",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0318_woman3",
+    "id_j": "0321_woman2",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0318_woman3",
+    "id_j": "0320_woman3",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0318_woman3",
+    "id_j": "0320_woman4",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0318_woman3",
+    "id_j": "0327_woman2",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0318_woman3",
+    "id_j": "0319_woman1",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0324_woman3",
+    "id_j": "0321_woman2",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0324_woman3",
+    "id_j": "0320_woman3",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0324_woman3",
+    "id_j": "0320_woman4",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0324_woman3",
+    "id_j": "0327_woman2",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0324_woman3",
+    "id_j": "0319_woman1",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0321_woman2",
+    "id_j": "0320_woman3",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0321_woman2",
+    "id_j": "0320_woman4",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0321_woman2",
+    "id_j": "0327_woman2",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0321_woman2",
+    "id_j": "0319_woman1",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0320_woman3",
+    "id_j": "0320_woman4",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0320_woman3",
+    "id_j": "0327_woman2",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0320_woman3",
+    "id_j": "0319_woman1",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0320_woman4",
+    "id_j": "0327_woman2",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0320_woman4",
+    "id_j": "0319_woman1",
+    "y": 1,
+    "camera": "400cm_inside"
+  },
+  {
+    "id_i": "0327_woman2",
+    "id_j": "0319_woman1",
+    "y": 1,
+    "camera": "400cm_inside"
+  }
+]

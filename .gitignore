@@ -1,0 +1,35 @@
+# Python caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# macOS metadata
+.DS_Store
+._*
+
+# Large/generated experiment artifacts
+runs/
+analysis_outputs/
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.npz
+*.npy
+*.tgz
+*.tar
+*.tar.gz
+*.zip
+
+# Logs and local envs
+*.log
+*.pid
+.env
+.venv/
+venv/
+
+# Editor noise
+.idea/
+.vscode/

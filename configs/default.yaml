@@ -1,0 +1,66 @@
+seed: 42
+device: cuda
+
+paths:
+  train_manifest: data/train_manifest.csv
+  val_manifest: data/val_manifest.csv
+  test_manifest: data/test_manifest.csv
+  output_dir: runs/default
+
+train:
+  epochs: 20
+  batch_size: 8
+  num_workers: 4
+  lr: 1.0e-4
+  weight_decay: 1.0e-4
+  grad_clip_norm: 1.0
+  use_amp: true
+  use_tensorboard: true
+  log_interval: 20
+  tb_num_images: 4
+
+loss:
+  lambda_rmse: 1.0
+  lambda_rank: 1.0
+  lambda_cons: 0.1
+  eps: 1.0e-6
+  min_valid_pixels: 64
+  min_valid_ratio: 0.002
+  pairwise_json: data/pairwise_rank/all_pairs.json
+  consistency_mode: map
+
+data:
+  image_size: [352, 704]
+  normalize_rgb: true
+  use_pair_consistency: true
+
+model:
+  name: heightnet_tiny
+  base_channels: 32
+  comparator_channels: 16
+  comparator_type: conv
+  comparator_layers: 2
+  comparator_num_heads: 4
+  comparator_patch_size: 16
+  person_region_mode: mask
+  bbox_expand_ratio: 0.25
+
+eval:
+  save_visualizations: true
+  vis_limit: 20
+
+runtime_seg:
+  enabled: true
+  model_path: /path/to/yolov8n-seg.pt
+  conf: 0.25
+  iou: 0.7
+  imgsz: 640
+  strict_native: true
+
+runtime_depth:
+  enabled: false
+  depthanything_root: /path/to/Depth-Anything-V2
+  encoder: vitl
+  checkpoint: /path/to/depth_anything_v2_vitl.pth
+  input_size: 518
+  assume_inverse: false

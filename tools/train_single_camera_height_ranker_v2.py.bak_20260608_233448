@@ -1,0 +1,705 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import math
+import random
+import re
+import sys
+import time
+from collections import defaultdict
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Iterable
+
+import numpy as np
+import torch
+from torch import nn
+import torch.nn.functional as F
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+
+CAM_RE = re.compile(r"_(?P<h>\d+d\d+)_(?P<a>\d+)(?:_(?P<p>\d+w))?_", re.I)
+BASE_BBOX_SCHEMA = [
+    "bbox_h_norm",
+    "bbox_w_norm",
+    "bbox_y1_norm_neg",
+    "bbox_y2_norm",
+    "bbox_cy_norm",
+    "area_norm",
+    "rect_score",
+]
+AGG_NAMES = ["mean", "median", "p75", "p90", "std"]
+CROP_SHAPE = (1, 128, 64)
+DEFAULT_TEST_CAMERAS = [
+    "2d5_0", "2d5_150", "2d5_30", "2d5_330", "2d5_90",
+    "3d5_0", "3d5_150", "3d5_30", "3d5_330", "3d5_90",
+    "4d5_0", "4d5_150", "4d5_30", "4d5_330", "4d5_90",
+]
+VARIANTS = ("tabular_v2", "crop_only", "temporal_crop", "fusion_v2", "fusion_v2_loss", "ensemble")
+
+
+def base_camera_from_name(name: str) -> str | None:
+    match = CAM_RE.search(str(name))
+    if not match:
+        return None
+    return f"{match.group('h').lower()}_{match.group('a')}"
+
+
+def camera_height_m(camera_id: str) -> float:
+    h = str(camera_id).split("_", 1)[0]
+    return float(h.replace("d", "."))
+
+
+def load_rank_csv(path: Path) -> dict[str, float]:
+    out: dict[str, float] = {}
+    with path.open(newline="", encoding="utf-8") as handle:
+        for row in csv.DictReader(handle):
+            pid = row.get("person_id") or row.get("penson_id") or row.get("pid")
+            height = row.get("height(cm)") or row.get("height_cm") or row.get("height")
+            if pid and height:
+                out[str(pid)] = float(height)
+    return out
+
+
+def load_split_csv(path: Path, split: str) -> list[dict]:
+    rows: list[dict] = []
+    with path.open(newline="", encoding="utf-8") as handle:
+        for row in csv.DictReader(handle):
+            pid = row.get("person_id") or row.get("penson_id") or row.get("pid")
+            video_path = row.get("video_path") or ""
+            video_filename = row.get("video_filename") or Path(video_path).name
+            camera_id = base_camera_from_name(video_filename)
+            if not pid or not video_filename or not camera_id:
+                continue
+            video_stem = Path(video_filename).stem
+            rows.append({
+                "split": split,
+                "person_id": str(pid),
+                "video_path": video_path,
+                "video_filename": video_filename,
+                "video_stem": video_stem,
+                "sequence_id": f"{pid}__{video_stem}",
+                "camera_id": camera_id,
+                "camera_height_m": camera_height_m(camera_id),
+            })
+    return rows
+
+
+def _safe_div(num: np.ndarray | float, den: np.ndarray | float) -> np.ndarray:
+    return np.asarray(num, dtype=np.float32) / np.maximum(np.asarray(den, dtype=np.float32), 1e-6)
+
+
+def camera_geometry_from_tabular(tabular: np.ndarray, camera_id: str, image_h: float = 600.0) -> np.ndarray:
+    bbox_h = float(tabular[0]) if len(tabular) > 0 else 0.0
+    foot_y = float(tabular[3]) if len(tabular) > 3 else 0.0
+    cam_h = camera_height_m(camera_id)
+    # A simple monotonic pixel-per-meter proxy for per-camera single-view geometry.
+    ppm_proxy = max(1e-3, image_h * max(0.05, bbox_h) / max(0.2, foot_y + 0.2))
+    pseudo_height = (bbox_h * image_h) / ppm_proxy
+    return np.array([cam_h, foot_y, math.log1p(ppm_proxy) / 6.0, pseudo_height], dtype=np.float32)
+
+
+def _crop_frame_stats(crops: np.ndarray) -> np.ndarray:
+    flat = crops.reshape(crops.shape[0], -1)
+    valid = flat > 1e-4
+    rows = []
+    for values, mask in zip(flat, valid):
+        fg = values[mask]
+        if fg.size == 0:
+            rows.append(np.zeros(12, dtype=np.float32))
+            continue
+        sorted_fg = np.sort(fg.astype(np.float32, copy=False))
+        top_k = sorted_fg[-max(1, min(32, sorted_fg.size)) :]
+        trimmed = sorted_fg[: max(1, int(round(sorted_fg.size * 0.98)))]
+        rows.append(np.array([
+            np.percentile(fg, 50),
+            np.percentile(fg, 75),
+            np.percentile(fg, 90),
+            np.percentile(fg, 95),
+            np.percentile(fg, 99),
+            np.max(trimmed),
+            np.mean(top_k),
+            np.percentile(fg, 75) - np.percentile(fg, 25),
+            float(mask.mean()),
+            float((fg > np.percentile(fg, 99)).mean()),
+            float(fg.mean()),
+            float(fg.std()),
+        ], dtype=np.float32))
+    return np.stack(rows, axis=0)
+
+
+def _body_zone_stats(crops: np.ndarray) -> np.ndarray:
+    rows = []
+    for crop in crops[:, 0]:
+        zones = [crop[:43], crop[43:86], crop[86:]]
+        vals = []
+        medians = []
+        for zone in zones:
+            fg = zone[zone > 1e-4]
+            if fg.size == 0:
+                vals.extend([0.0, 0.0, 0.0])
+                medians.append(0.0)
+            else:
+                vals.extend([float(np.median(fg)), float(np.percentile(fg, 90)), float(np.percentile(fg, 95))])
+                medians.append(float(np.median(fg)))
+        vals.append(medians[0] - medians[-1])
+        rows.append(np.asarray(vals, dtype=np.float32))
+    return np.stack(rows, axis=0)
+
+
+def build_v2_frame_features(bbox_feats: np.ndarray, height_stats: np.ndarray, crops: np.ndarray, camera_id: str) -> np.ndarray:
+    bbox = np.asarray(bbox_feats, dtype=np.float32)
+    stats = np.asarray(height_stats, dtype=np.float32)
+    crops = np.asarray(crops, dtype=np.float32)
+    h = bbox[:, 0]
+    w = bbox[:, 1]
+    y2 = bbox[:, 3]
+    cy = bbox[:, 4]
+    aspect = _safe_div(w, h).reshape(-1, 1)
+    center_x = np.zeros((bbox.shape[0], 1), dtype=np.float32)
+    foot_x = center_x.copy()
+    foot_y = y2.reshape(-1, 1)
+    h_over_y2 = _safe_div(h, y2).reshape(-1, 1)
+    selected_stats = []
+    for idx in range(min(stats.shape[1], 5)):
+        selected_stats.append(stats[:, idx:idx + 1])
+    while len(selected_stats) < 5:
+        selected_stats.append(np.zeros((bbox.shape[0], 1), dtype=np.float32))
+    crop_stats = _crop_frame_stats(crops)
+    zone_stats = _body_zone_stats(crops)
+    geom = np.stack([camera_geometry_from_tabular(row, camera_id) for row in bbox], axis=0)
+    return np.concatenate(
+        [bbox, aspect, center_x, foot_x, foot_y, h_over_y2, *selected_stats, crop_stats, zone_stats, geom],
+        axis=1,
+    ).astype(np.float32, copy=False)
+
+
+def aggregate_frame_features(frame_features: np.ndarray) -> np.ndarray:
+    x = np.asarray(frame_features, dtype=np.float32)
+    if x.ndim != 2 or x.shape[0] == 0:
+        raise ValueError(f"frame_features must be non-empty [N,D], got {x.shape}")
+    parts = [
+        np.mean(x, axis=0),
+        np.median(x, axis=0),
+        np.percentile(x, 75, axis=0),
+        np.percentile(x, 90, axis=0),
+        np.std(x, axis=0),
+    ]
+    out = np.concatenate(parts, axis=0).astype(np.float32, copy=False)
+    out[~np.isfinite(out)] = 0.0
+    return out
+
+
+def build_v2_sequence_features(bbox_feats: np.ndarray, height_stats: np.ndarray, crops: np.ndarray, camera_id: str) -> np.ndarray:
+    return aggregate_frame_features(build_v2_frame_features(bbox_feats, height_stats, crops, camera_id))
+
+
+@dataclass
+class SequenceItem:
+    sequence_id: str
+    person_id: str
+    camera_id: str
+    split: str
+    height_cm: float
+    video_filename: str
+    npz_path: str
+    tabular: np.ndarray
+    frame_tabular: np.ndarray
+    crops: np.ndarray
+    geom_score: float
+    robust_height_score: float
+
+
+def load_sequence_npz(path: Path, camera_id: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    with np.load(path, allow_pickle=False) as data:
+        bbox = np.asarray(data["bbox_feats"], dtype=np.float32)
+        stats = np.asarray(data["height_stats"], dtype=np.float32)
+        crops = np.asarray(data["heightmap_crops"], dtype=np.float32)
+        valid_count = int(np.asarray(data["valid_count"]).reshape(-1)[0]) if "valid_count" in data.files else len(bbox)
+    valid_count = max(0, min(valid_count, len(bbox), len(stats), len(crops)))
+    if valid_count <= 0:
+        raise ValueError(f"{path}: no valid frames")
+    bbox = bbox[:valid_count]
+    stats = stats[:valid_count]
+    crops = crops[:valid_count]
+    if bbox.ndim != 2 or bbox.shape[1] != 7:
+        raise ValueError(f"{path}: bbox_feats must be [N,7], got {bbox.shape}")
+    if stats.ndim != 2 or stats.shape[1] < 5:
+        raise ValueError(f"{path}: height_stats must be [N,>=5], got {stats.shape}")
+    if crops.ndim != 4 or tuple(crops.shape[1:]) != CROP_SHAPE:
+        raise ValueError(f"{path}: heightmap_crops must be [N,1,128,64], got {crops.shape}")
+    if not np.all(np.isfinite(bbox)) or not np.all(np.isfinite(stats)) or not np.all(np.isfinite(crops)):
+        raise ValueError(f"{path}: non-finite values")
+    return bbox, stats, crops
+
+
+def load_items(data_root: Path, feature_root: Path, allowed_cameras: set[str] | None = None) -> list[SequenceItem]:
+    heights = load_rank_csv(data_root / "label" / "rank.json")
+    rows: list[dict] = []
+    for split in ("train", "val", "test"):
+        rows.extend(load_split_csv(data_root / f"{split}.csv", split))
+    items: list[SequenceItem] = []
+    seen: set[str] = set()
+    for row in rows:
+        if allowed_cameras is not None and row["camera_id"] not in allowed_cameras:
+            continue
+        if row["person_id"] not in heights:
+            continue
+        sid = row["sequence_id"]
+        if sid in seen:
+            continue
+        seen.add(sid)
+        npz_path = feature_root / row["person_id"] / f"{row['video_stem']}.npz"
+        if not npz_path.exists():
+            continue
+        try:
+            bbox, stats, crops = load_sequence_npz(npz_path, row["camera_id"])
+            frame_tabular = build_v2_frame_features(bbox, stats, crops, row["camera_id"])
+            tabular = aggregate_frame_features(frame_tabular)
+        except Exception:
+            continue
+        geom_score = float(np.nanmean(bbox[:, 0] / np.maximum(bbox[:, 3], 1e-6)))
+        robust_height_score = float(np.nanmean(np.percentile(crops.reshape(crops.shape[0], -1), 95, axis=1)))
+        items.append(SequenceItem(
+            sequence_id=sid,
+            person_id=row["person_id"],
+            camera_id=row["camera_id"],
+            split=row["split"],
+            height_cm=float(heights[row["person_id"]]),
+            video_filename=row["video_filename"],
+            npz_path=str(npz_path),
+            tabular=tabular,
+            frame_tabular=frame_tabular,
+            crops=crops,
+            geom_score=geom_score,
+            robust_height_score=robust_height_score,
+        ))
+    return items
+
+
+class TabularEncoder(nn.Module):
+    def __init__(self, input_dim: int, out_dim: int = 96, hidden: int = 192):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, hidden), nn.ReLU(inplace=True), nn.Dropout(0.10),
+            nn.Linear(hidden, hidden // 2), nn.ReLU(inplace=True),
+            nn.Linear(hidden // 2, out_dim), nn.ReLU(inplace=True),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
+
+
+class FrameCropEncoder(nn.Module):
+    def __init__(self, out_dim: int = 96):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv2d(3, 24, 5, stride=2, padding=2, bias=False),
+            nn.GroupNorm(1, 24), nn.ReLU(inplace=True),
+            nn.Conv2d(24, 48, 3, stride=2, padding=1, bias=False),
+            nn.GroupNorm(1, 48), nn.ReLU(inplace=True),
+            nn.Conv2d(48, 72, 3, stride=2, padding=1, bias=False),
+            nn.GroupNorm(1, 72), nn.ReLU(inplace=True),
+            nn.AdaptiveAvgPool2d((1, 1)), nn.Flatten(),
+            nn.Linear(72, out_dim), nn.ReLU(inplace=True),
+        )
+
+    @staticmethod
+    def add_channels(crops: torch.Tensor) -> torch.Tensor:
+        # crops: [B,T,1,H,W]
+        b, t, _, h, w = crops.shape
+        valid = (crops.abs() > 1e-4).to(crops.dtype)
+        y = torch.linspace(0.0, 1.0, h, device=crops.device, dtype=crops.dtype).view(1, 1, 1, h, 1)
+        y = y.expand(b, t, 1, h, w)
+        return torch.cat([crops, valid, y], dim=2)
+
+    def forward(self, crops: torch.Tensor) -> torch.Tensor:
+        b, t, c, h, w = crops.shape
+        x = self.add_channels(crops).reshape(b * t, c + 2, h, w)
+        return self.net(x).reshape(b, t, -1)
+
+
+class SingleCameraHeightRankerV2(nn.Module):
+    def __init__(self, tabular_dim: int, variant: str = "fusion_v2", max_frames: int = 48, embedding_dim: int = 128):
+        super().__init__()
+        if variant == "temporal_crop":
+            variant = "crop_only"
+        if variant == "fusion_v2_loss":
+            variant = "fusion_v2"
+        if variant not in {"tabular_v2", "crop_only", "fusion_v2"}:
+            raise ValueError(f"unsupported model variant: {variant}")
+        self.variant = variant
+        self.max_frames = int(max_frames)
+        self.tabular = TabularEncoder(tabular_dim, out_dim=96)
+        self.crop = FrameCropEncoder(out_dim=96)
+        if variant == "tabular_v2":
+            fusion_in = 96
+        elif variant == "crop_only":
+            fusion_in = 96
+        else:
+            fusion_in = 192
+        self.fusion = nn.Sequential(nn.Linear(fusion_in, embedding_dim), nn.ReLU(inplace=True))
+        self.quality = nn.Sequential(nn.Linear(96, 32), nn.ReLU(inplace=True), nn.Linear(32, 1))
+        self.score = nn.Sequential(nn.Linear(embedding_dim, 64), nn.ReLU(inplace=True), nn.Linear(64, 1))
+        self.height_head = nn.Linear(embedding_dim, 1)
+
+    def encode(self, tabular: torch.Tensor, crops: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        tab_feat = self.tabular(tabular)
+        crop_frame = self.crop(crops)
+        q = self.quality(crop_frame).squeeze(-1)
+        weights = torch.softmax(q, dim=1)
+        weighted = (crop_frame * weights.unsqueeze(-1)).sum(dim=1)
+        top_k = min(4, crop_frame.shape[1])
+        top_idx = torch.topk(q, k=top_k, dim=1).indices
+        top_feat = torch.gather(crop_frame, 1, top_idx.unsqueeze(-1).expand(-1, -1, crop_frame.shape[-1])).mean(dim=1)
+        crop_feat = 0.5 * weighted + 0.5 * top_feat
+        if self.variant == "tabular_v2":
+            fused_in = tab_feat
+        elif self.variant == "crop_only":
+            fused_in = crop_feat
+        else:
+            fused_in = torch.cat([tab_feat, crop_feat], dim=1)
+        emb = self.fusion(fused_in)
+        return emb, q
+
+    def forward(self, tabular: torch.Tensor, crops: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        emb, quality = self.encode(tabular, crops)
+        return self.score(emb).squeeze(1), self.height_head(emb).squeeze(1), quality
+
+
+def pair_logits(model: SingleCameraHeightRankerV2, tab_a: torch.Tensor, crop_a: torch.Tensor, tab_b: torch.Tensor, crop_b: torch.Tensor) -> torch.Tensor:
+    score_a, _, _ = model(tab_a, crop_a)
+    score_b, _, _ = model(tab_b, crop_b)
+    return score_a - score_b
+
+
+def standardize(train: np.ndarray, all_x: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    mu = train.mean(axis=0)
+    sd = train.std(axis=0)
+    sd[sd < 1e-6] = 1.0
+    return (all_x - mu) / sd, mu.astype(np.float32), sd.astype(np.float32)
+
+
+def pad_or_sample_frames(item: SequenceItem, max_frames: int, rng: np.random.Generator | None = None) -> np.ndarray:
+    crops = item.crops.astype(np.float32, copy=False)
+    n = crops.shape[0]
+    if n >= max_frames:
+        if rng is None:
+            idx = np.linspace(0, n - 1, max_frames).round().astype(np.int64)
+        else:
+            idx = np.sort(rng.choice(n, size=max_frames, replace=False))
+        return crops[idx]
+    pad = np.repeat(crops[-1:], max_frames - n, axis=0)
+    return np.concatenate([crops, pad], axis=0)
+
+
+def build_tensors(items: list[SequenceItem], mu: np.ndarray, sd: np.ndarray, max_frames: int, device: torch.device, rng: np.random.Generator | None = None):
+    x = np.stack([(item.tabular - mu) / sd for item in items]).astype(np.float32)
+    c = np.stack([pad_or_sample_frames(item, max_frames, rng) for item in items]).astype(np.float32)
+    y = np.asarray([item.height_cm for item in items], dtype=np.float32)
+    return torch.tensor(x, device=device), torch.tensor(c, device=device), torch.tensor(y, device=device)
+
+
+def rankdata(values: Iterable[float]) -> list[float]:
+    vals = list(values)
+    order = sorted(range(len(vals)), key=lambda i: vals[i])
+    ranks = [0.0] * len(vals)
+    pos = 0
+    while pos < len(order):
+        end = pos
+        while end + 1 < len(order) and vals[order[end + 1]] == vals[order[pos]]:
+            end += 1
+        rank = (pos + end + 2.0) / 2.0
+        for idx in order[pos:end + 1]:
+            ranks[idx] = rank
+        pos = end + 1
+    return ranks
+
+
+def corr(a: list[float], b: list[float]) -> float | None:
+    if len(a) < 2:
+        return None
+    aa = np.asarray(a, dtype=np.float64)
+    bb = np.asarray(b, dtype=np.float64)
+    aa -= aa.mean()
+    bb -= bb.mean()
+    den = math.sqrt(float((aa * aa).sum() * (bb * bb).sum()))
+    return float((aa * bb).sum() / den) if den > 0 else None
+
+
+def height_gap_bucket(gap: float) -> str:
+    return "lt3" if gap < 3 else "3to5" if gap < 5 else "5to8" if gap < 8 else "ge8"
+
+
+def pairwise_metrics(items: list[SequenceItem], scores: dict[str, float]) -> dict:
+    correct = total = 0
+    buckets = {k: [0, 0] for k in ("lt3", "3to5", "5to8", "ge8")}
+    ids = [item.sequence_id for item in items]
+    heights = {item.sequence_id: item.height_cm for item in items}
+    for i, a in enumerate(ids):
+        for b in ids[i + 1:]:
+            if heights[a] == heights[b]:
+                continue
+            ok = (scores[a] > scores[b]) == (heights[a] > heights[b])
+            correct += int(ok)
+            total += 1
+            bucket = height_gap_bucket(abs(heights[a] - heights[b]))
+            buckets[bucket][0] += int(ok)
+            buckets[bucket][1] += 1
+    pred = [scores[sid] for sid in ids]
+    gt = [heights[sid] for sid in ids]
+    return {
+        "n": len(items),
+        "pairwise_accuracy": correct / total if total else None,
+        "spearman": corr(rankdata(pred), rankdata(gt)),
+        "height_gap_bucket_pairwise_accuracy": {
+            key: {"accuracy": c / n if n else None, "pairs": n}
+            for key, (c, n) in buckets.items()
+        },
+    }
+
+
+def split_items(items: list[SequenceItem], camera_id: str) -> dict[str, list[SequenceItem]]:
+    by_split = {"train": [], "val": [], "test": []}
+    seen: dict[str, set[str]] = {k: set() for k in by_split}
+    for item in items:
+        if item.camera_id != camera_id or item.split not in by_split:
+            continue
+        if item.sequence_id in seen[item.split]:
+            continue
+        seen[item.split].add(item.sequence_id)
+        by_split[item.split].append(item)
+    return by_split
+
+
+def pick_pairs(items: list[SequenceItem], batch_size: int, rng: np.random.Generator) -> tuple[list[SequenceItem], list[SequenceItem]]:
+    left: list[SequenceItem] = []
+    right: list[SequenceItem] = []
+    while len(left) < batch_size:
+        a, b = rng.choice(items, size=2, replace=False)
+        if a.height_cm == b.height_cm:
+            continue
+        left.append(a)
+        right.append(b)
+    return left, right
+
+
+def weighted_pair_loss(logits: torch.Tensor, left: list[SequenceItem], right: list[SequenceItem], device: torch.device) -> torch.Tensor:
+    diffs = torch.tensor([a.height_cm - b.height_cm for a, b in zip(left, right)], dtype=torch.float32, device=device)
+    targets = torch.sigmoid(diffs / 3.0)
+    weights = torch.tensor([
+        2.0 if abs(float(d)) < 3 else 1.5 if abs(float(d)) < 5 else 1.0 if abs(float(d)) < 8 else 0.75
+        for d in diffs
+    ], dtype=torch.float32, device=device)
+    loss = F.binary_cross_entropy_with_logits(logits, targets, reduction="none")
+    return (loss * weights).sum() / weights.sum().clamp_min(1e-6)
+
+
+def train_camera(camera_id: str, items: list[SequenceItem], args, device: torch.device) -> dict:
+    by_split = split_items(items, camera_id)
+    if len(by_split["train"]) < 2 or len(by_split["test"]) < 2:
+        return {"skipped": True, "split_counts": {k: len(v) for k, v in by_split.items()}}
+    train_x = np.stack([item.tabular for item in by_split["train"]]).astype(np.float32)
+    all_items = by_split["train"] + by_split["val"] + by_split["test"]
+    all_x = np.stack([item.tabular for item in all_items]).astype(np.float32)
+    _, mu, sd = standardize(train_x, all_x)
+    height_values = np.asarray([item.height_cm for item in by_split["train"]], dtype=np.float32)
+    height_mu = float(height_values.mean())
+    height_sd = float(height_values.std())
+    if height_sd < 1e-6:
+        height_sd = 1.0
+    model_variant = "fusion_v2" if args.variant in {"fusion_v2_loss", "ensemble"} else args.variant
+    if model_variant == "temporal_crop":
+        model_variant = "crop_only"
+    results = []
+    ckpt_dir = Path(args.out_dir) / "checkpoints"
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    for seed in args.seeds:
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+        rng = np.random.default_rng(seed)
+        model = SingleCameraHeightRankerV2(len(mu), variant=model_variant, max_frames=args.max_frames).to(device)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
+        best = None
+        best_state = None
+        for epoch in range(1, args.epochs + 1):
+            model.train()
+            sums = defaultdict(float)
+            for _ in range(args.steps_per_epoch):
+                left, right = pick_pairs(by_split["train"], args.batch_size, rng)
+                tab_l, crop_l, y_l = build_tensors(left, mu, sd, args.max_frames, device, rng)
+                tab_r, crop_r, y_r = build_tensors(right, mu, sd, args.max_frames, device, rng)
+                logits = pair_logits(model, tab_l, crop_l, tab_r, crop_r)
+                if args.variant == "fusion_v2_loss":
+                    pair_loss = weighted_pair_loss(logits, left, right, device)
+                else:
+                    targets = (y_l > y_r).to(torch.float32)
+                    pair_loss = F.binary_cross_entropy_with_logits(logits, targets)
+                score_l, h_l, _ = model(tab_l, crop_l)
+                score_r, h_r, _ = model(tab_r, crop_r)
+                h_targets = torch.cat([(y_l - height_mu) / height_sd, (y_r - height_mu) / height_sd])
+                height_loss = F.smooth_l1_loss(torch.cat([h_l, h_r]), h_targets)
+                track_loss = torch.tensor(0.0, device=device)
+                if args.variant == "fusion_v2_loss" and args.lambda_track > 0:
+                    track_terms = []
+                    for item in rng.choice(by_split["train"], size=min(args.track_batch_size, len(by_split["train"])), replace=True):
+                        if item.crops.shape[0] < 2:
+                            continue
+                        idx = rng.choice(item.crops.shape[0], size=2, replace=False)
+                        temp = SequenceItem(**{**item.__dict__, "crops": item.crops[idx]})
+                        tab_t, crop_t, _, = build_tensors([temp], mu, sd, 2, device, None)
+                        _, _, quality = model(tab_t, crop_t)
+                        track_terms.append(quality.std())
+                    if track_terms:
+                        track_loss = torch.stack(track_terms).mean()
+                loss = pair_loss + args.lambda_height * height_loss + args.lambda_track * track_loss
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+                sums["loss"] += float(loss.item())
+                sums["pair_loss"] += float(pair_loss.item())
+            val_scores = score_items(model, by_split["val"] or by_split["train"], mu, sd, args.max_frames, device)
+            val_metrics = pairwise_metrics(by_split["val"] or by_split["train"], val_scores)
+            key = val_metrics["pairwise_accuracy"] or -1.0
+            if best is None or key > best["val_pairwise"]:
+                best = {"epoch": epoch, "val_pairwise": key, "val": val_metrics}
+                best_state = {k: v.detach().cpu() for k, v in model.state_dict().items()}
+        model.load_state_dict(best_state)
+        split_metrics = {}
+        split_scores = {}
+        for split, split_list in by_split.items():
+            scores = score_items(model, split_list, mu, sd, args.max_frames, device)
+            split_scores[split] = scores
+            split_metrics[split] = pairwise_metrics(split_list, scores)
+        ckpt_path = ckpt_dir / f"{camera_id}_{args.variant}_seed{seed}.pt"
+        torch.save({
+            "model_state_dict": best_state,
+            "camera_id": camera_id,
+            "variant": args.variant,
+            "model_variant": model_variant,
+            "seed": seed,
+            "best_epoch": best["epoch"],
+            "tabular_dim": int(len(mu)),
+            "max_frames": args.max_frames,
+            "mu": mu,
+            "sd": sd,
+            "height_mu": height_mu,
+            "height_sd": height_sd,
+            "scores": split_scores,
+        }, ckpt_path)
+        results.append({
+            "seed": seed,
+            "best_epoch": best["epoch"],
+            "val_pairwise": best["val_pairwise"],
+            **split_metrics,
+            "checkpoint_path": str(ckpt_path),
+        })
+    best_result = max(results, key=lambda r: ((r["val"]["pairwise_accuracy"] or -1.0), (r["test"]["pairwise_accuracy"] or -1.0)))
+    return {
+        "skipped": False,
+        "split_counts": {k: len(v) for k, v in by_split.items()},
+        "variant": args.variant,
+        "seeds": results,
+        "best": best_result,
+    }
+
+
+@torch.no_grad()
+def score_items(model: SingleCameraHeightRankerV2, items: list[SequenceItem], mu: np.ndarray, sd: np.ndarray, max_frames: int, device: torch.device) -> dict[str, float]:
+    model.eval()
+    scores: dict[str, float] = {}
+    for start in range(0, len(items), 128):
+        batch = items[start:start + 128]
+        if not batch:
+            continue
+        tab, crops, _ = build_tensors(batch, mu, sd, max_frames, device, None)
+        pred, _, _ = model(tab, crops)
+        for item, score in zip(batch, pred.detach().cpu().tolist()):
+            scores[item.sequence_id] = float(score)
+    return scores
+
+
+def summarize_camera_results(camera_results: dict) -> dict:
+    values = []
+    for cam, result in camera_results.items():
+        if result.get("skipped"):
+            continue
+        acc = result["best"]["test"]["pairwise_accuracy"]
+        if acc is not None:
+            values.append((cam, float(acc)))
+    scores = [v for _, v in values]
+    return {
+        "camera_count": len(values),
+        "macro_test_pairwise_accuracy": float(np.mean(scores)) if scores else None,
+        "median_test_pairwise_accuracy": float(np.median(scores)) if scores else None,
+        "min_test_pairwise_accuracy": float(np.min(scores)) if scores else None,
+        "max_test_pairwise_accuracy": float(np.max(scores)) if scores else None,
+        "per_camera_test_pairwise_accuracy": dict(values),
+    }
+
+
+def train_all(args) -> dict:
+    started = time.time()
+    device = torch.device(args.device)
+    if args.target_cameras:
+        cameras = [cam.strip() for cam in args.target_cameras.split(",") if cam.strip()]
+    else:
+        cameras = list(DEFAULT_TEST_CAMERAS)
+    if args.limit_cameras > 0:
+        cameras = cameras[: args.limit_cameras]
+    items = load_items(Path(args.data_root), Path(args.feature_root), allowed_cameras=set(cameras))
+    cameras = sorted(set(cameras) & {item.camera_id for item in items if item.split == "test"})
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    camera_results = {}
+    for cam in cameras:
+        print(f"[CAM] {cam}", flush=True)
+        camera_results[cam] = train_camera(cam, items, args, device)
+    payload = {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "args": vars(args),
+        "variant": args.variant,
+        "camera_results": camera_results,
+        "summary": summarize_camera_results(camera_results),
+        "duration_seconds": time.time() - started,
+    }
+    (out_dir / "results.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    print(json.dumps(payload["summary"], ensure_ascii=False, indent=2), flush=True)
+    return payload
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--data-root", default="/home/zyding/data")
+    parser.add_argument("--feature-root", default="/home/zyding/height/jianzhi_2511_sequence/features")
+    parser.add_argument("--out-dir", default="runs/single_camera_height_ranker_v2/default")
+    parser.add_argument("--variant", choices=VARIANTS, default="fusion_v2")
+    parser.add_argument("--seeds", type=int, nargs="+", default=[1, 2, 3])
+    parser.add_argument("--epochs", type=int, default=300)
+    parser.add_argument("--steps-per-epoch", type=int, default=100)
+    parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--max-frames", type=int, default=48)
+    parser.add_argument("--track-batch-size", type=int, default=8)
+    parser.add_argument("--lambda-height", type=float, default=0.2)
+    parser.add_argument("--lambda-track", type=float, default=0.05)
+    parser.add_argument("--lr", type=float, default=2e-3)
+    parser.add_argument("--limit-cameras", type=int, default=0)
+    parser.add_argument("--target-cameras", default="", help="comma-separated camera ids; defaults to all test cameras")
+    parser.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu")
+    args = parser.parse_args()
+    if args.variant == "ensemble":
+        from tools.summarize_single_camera_height_ranker_v2 import main as summarize_main
+        summarize_main()
+        return
+    train_all(args)
+
+
+if __name__ == "__main__":
+    main()
