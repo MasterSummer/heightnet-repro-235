@@ -3,16 +3,20 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
 import sys
 import time
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
 import torch
+import torch.distributed as dist
 from torch import nn
+from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.nn.functional as F
 from scipy.stats import kendalltau
 
@@ -32,7 +36,93 @@ from tools.cross_camera_heightmap_fusion_core import (
     rankdata,
     sample_cross_camera_triplet,
     sample_track_frame_pair,
+    score_identity_consistency_loss,
 )
+
+
+@dataclass(frozen=True)
+class DistributedContext:
+    distributed: bool
+    rank: int
+    local_rank: int
+    world_size: int
+    device: torch.device
+
+    @property
+    def is_main(self) -> bool:
+        return self.rank == 0
+
+
+def _distributed_context_from_env(device_arg: str, environ: dict[str, str] | None = None) -> DistributedContext:
+    env = os.environ if environ is None else environ
+    world_size = int(env.get("WORLD_SIZE", "1"))
+    if world_size <= 1:
+        return DistributedContext(
+            distributed=False,
+            rank=0,
+            local_rank=0,
+            world_size=1,
+            device=torch.device(device_arg),
+        )
+    rank = int(env.get("RANK", "0"))
+    local_rank = int(env.get("LOCAL_RANK", "0"))
+    if torch.cuda.is_available():
+        device = torch.device("cuda", local_rank)
+    else:
+        device = torch.device("cpu")
+    return DistributedContext(
+        distributed=True,
+        rank=rank,
+        local_rank=local_rank,
+        world_size=world_size,
+        device=device,
+    )
+
+
+def _setup_distributed(ctx: DistributedContext) -> None:
+    if not ctx.distributed:
+        return
+    if ctx.device.type == "cuda":
+        torch.cuda.set_device(ctx.local_rank)
+    backend = "nccl" if ctx.device.type == "cuda" else "gloo"
+    dist.init_process_group(backend=backend)
+
+
+def _cleanup_distributed() -> None:
+    if dist.is_available() and dist.is_initialized():
+        dist.destroy_process_group()
+
+
+def _model_core(model):
+    return model.module if hasattr(model, "module") else model
+
+
+def _compare_encoded_for_training(model, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    if hasattr(model, "module"):
+        return model(op="compare_encoded", encoded_a=a, encoded_b=b)
+    return model.compare_encoded(a, b)
+
+
+def _score_identity_consistency_loss_for_training(
+    model,
+    embeddings: torch.Tensor,
+    person_ids: list[str],
+) -> tuple[torch.Tensor, int]:
+    if hasattr(model, "module"):
+        if embeddings.shape[0] != len(person_ids):
+            raise ValueError(f"embeddings/person_ids length mismatch: {embeddings.shape[0]} vs {len(person_ids)}")
+        scores = model(op="score", embeddings=embeddings)
+        losses: list[torch.Tensor] = []
+        for person_id in sorted(set(str(pid) for pid in person_ids)):
+            indices = [idx for idx, pid in enumerate(person_ids) if str(pid) == person_id]
+            if len(indices) < 2:
+                continue
+            group = scores[torch.tensor(indices, dtype=torch.long, device=scores.device)]
+            losses.append(((group - group.mean()) ** 2).mean())
+        if not losses:
+            return scores.sum() * 0.0, 0
+        return torch.stack(losses).mean(), len(losses)
+    return score_identity_consistency_loss(model, embeddings, person_ids)
 
 
 def _load_rows(data_root: Path, feature_root: Path, limit_per_split_camera: int) -> dict[str, list[dict]]:
@@ -169,6 +259,26 @@ def _pick_supervised_pairs(rows: list[dict], batch_size: int, rng: np.random.Gen
     return left, right, torch.tensor(labels, dtype=torch.float32)
 
 
+def _sample_identity_consistency_rows(rows: list[dict], group_count: int, rng: np.random.Generator) -> list[dict]:
+    if group_count <= 0:
+        return []
+    by_person: dict[str, list[dict]] = defaultdict(list)
+    for row in rows:
+        by_person[str(row["person_id"])].append(row)
+    eligible = [person_id for person_id, items in by_person.items() if len(items) >= 2]
+    if not eligible:
+        return []
+    replace_people = group_count > len(eligible)
+    chosen_people = rng.choice(eligible, size=group_count, replace=replace_people)
+    sampled: list[dict] = []
+    for person_id in chosen_people:
+        person_id = str(person_id)
+        items = by_person[person_id]
+        indices = rng.choice(len(items), size=2, replace=False)
+        sampled.extend([items[int(indices[0])], items[int(indices[1])]])
+    return sampled
+
+
 def _height_gap_bucket(gap_cm: float) -> str:
     return "lt3" if gap_cm < 3 else "3to5" if gap_cm < 5 else "5to8" if gap_cm < 8 else "ge8"
 
@@ -239,7 +349,7 @@ def _height_regression_loss(
 
 def _encode_rows(model, rows, camera_vocab, mu, sd, device, geometry_kwargs: dict | None = None):
     tensors = _sequence_tensors(rows, camera_vocab, mu, sd, device, geometry_kwargs)
-    return model.encode(*tensors)
+    return model(*tensors)
 
 
 def _person_camera_records(model, rows, camera_vocab, mu, sd, device, geometry_kwargs: dict | None = None) -> list[dict]:
@@ -322,6 +432,15 @@ def evaluate(model, rows, camera_vocab, mu, sd, device, geometry_kwargs: dict | 
 
 def train(args) -> dict:
     started = time.time()
+    ctx = _distributed_context_from_env(args.device)
+    _setup_distributed(ctx)
+    device = ctx.device
+    worker_seed = int(args.seed) + ctx.rank * 100003
+    random.seed(worker_seed)
+    np.random.seed(worker_seed)
+    torch.manual_seed(worker_seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(worker_seed)
     data_root, feature_root = Path(args.data_root), Path(args.feature_root)
     labels = load_height_labels(data_root / "label" / "rank.json")
     split_rows = _load_rows(data_root, feature_root, 0)
@@ -335,7 +454,7 @@ def train(args) -> dict:
     }
     if len({row["person_id"] for row in labeled["train"]}) < 2:
         raise ValueError("training requires at least two labeled people")
-    sample_cross_camera_triplet(labeled["train"], np.random.default_rng(args.seed))
+    sample_cross_camera_triplet(labeled["train"], np.random.default_rng(worker_seed))
     all_rows = sum(labeled.values(), [])
     camera_vocab = _camera_vocab(all_rows)
     mu, sd = _scaler(labeled["train"])
@@ -344,22 +463,34 @@ def train(args) -> dict:
     height_sd = float(height_values.std())
     if height_sd < 1e-6:
         height_sd = 1.0
-    device = torch.device(args.device)
-    random.seed(args.seed)
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
-    torch.cuda.manual_seed_all(args.seed)
-    rng = np.random.default_rng(args.seed)
+    rng = np.random.default_rng(worker_seed)
     bucket_weights = _parse_bucket_weights(args.near_bucket_weights)
     geometry_kwargs = _geometry_kwargs(args) if args.use_camera_geometry else None
     camera_geometry_dim = CAMERA_GEOMETRY_FEATURE_DIM if args.use_camera_geometry else 0
     model = CrossCameraFusionRanker(camera_count=len(camera_vocab), embedding_dim=args.embedding_dim, camera_geometry_dim=camera_geometry_dim).to(device)
     height_head = HeightRegressionHead(args.embedding_dim).to(device) if args.lambda_height > 0 else None
+    if ctx.distributed:
+        ddp_kwargs = {
+            "device_ids": [ctx.local_rank],
+            "output_device": ctx.local_rank,
+        } if device.type == "cuda" else {}
+        model = DDP(model, find_unused_parameters=False, **ddp_kwargs)
+        if hasattr(model, "_set_static_graph"):
+            model._set_static_graph()
+        if height_head is not None:
+            height_head = DDP(height_head, find_unused_parameters=False, **ddp_kwargs)
+            if hasattr(height_head, "_set_static_graph"):
+                height_head._set_static_graph()
+    model_ref = _model_core(model)
+    height_head_ref = _model_core(height_head) if height_head is not None else None
     params = list(model.parameters()) + (list(height_head.parameters()) if height_head is not None else [])
     optimizer = torch.optim.AdamW(params, lr=args.lr, weight_decay=1e-4)
     best = None
     out_dir = Path(args.out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    if ctx.is_main:
+        out_dir.mkdir(parents=True, exist_ok=True)
+    if ctx.distributed:
+        dist.barrier()
     train_people = {row["person_id"] for row in labeled["train"]}
     strict_test = filter_strict_no_train_overlap(labeled["test"], train_people)
     overlap = {
@@ -369,21 +500,31 @@ def train(args) -> dict:
     history = []
     for epoch in range(1, args.epochs + 1):
         model.train()
+        if height_head is not None:
+            height_head.train()
         sums = defaultdict(float)
         for _ in range(args.steps_per_epoch):
             left, right, _ = _pick_supervised_pairs(labeled["train"], args.batch_size, rng)
             targets, pair_weights = _pair_targets_and_weights(left, right, args.pair_label_mode, args.pair_soft_temperature_cm, bucket_weights)
             za = _encode_rows(model, left, camera_vocab, mu, sd, device, geometry_kwargs)
             zb = _encode_rows(model, right, camera_vocab, mu, sd, device, geometry_kwargs)
-            pair_loss = _weighted_bce_with_logits(model.compare_encoded(za, zb), targets.to(device), pair_weights.to(device))
+            pair_loss = _weighted_bce_with_logits(_compare_encoded_for_training(model, za, zb), targets.to(device), pair_weights.to(device))
             cross_terms = []
             for _ in range(args.consistency_batch_size):
                 a, ap, b = sample_cross_camera_triplet(labeled["train"], rng)
                 z_a = _encode_rows(model, [a], camera_vocab, mu, sd, device, geometry_kwargs)
                 z_ap = _encode_rows(model, [ap], camera_vocab, mu, sd, device, geometry_kwargs)
                 z_b = _encode_rows(model, [b], camera_vocab, mu, sd, device, geometry_kwargs)
-                cross_terms.append(F.mse_loss(torch.sigmoid(model.compare_encoded(z_a, z_b)), torch.sigmoid(model.compare_encoded(z_ap, z_b))))
+                cross_terms.append(F.mse_loss(torch.sigmoid(_compare_encoded_for_training(model, z_a, z_b)), torch.sigmoid(_compare_encoded_for_training(model, z_ap, z_b))))
             cross_loss = torch.stack(cross_terms).mean()
+            id_rows = _sample_identity_consistency_rows(labeled["train"], args.consistency_batch_size, rng)
+            if id_rows and args.lambda_id_score > 0:
+                id_embeddings = _encode_rows(model, id_rows, camera_vocab, mu, sd, device, geometry_kwargs)
+                id_person_ids = [str(row["person_id"]) for row in id_rows]
+                id_score_loss, id_group_count = _score_identity_consistency_loss_for_training(model, id_embeddings, id_person_ids)
+            else:
+                id_score_loss = pair_loss.new_tensor(0.0)
+                id_group_count = 0
             track_terms = []
             track_rows = rng.choice(labeled["train"], size=args.track_batch_size, replace=True)
             for row in track_rows:
@@ -392,32 +533,49 @@ def train(args) -> dict:
                     continue
                 i, j = sample_track_frame_pair(frames.count, rng)
                 tensors = _frame_tensors(row, [i, j], camera_vocab, mu, sd, device, geometry_kwargs)
-                encoded = model.encode(*tensors)
+                encoded = model(*tensors)
                 track_terms.append(F.mse_loss(encoded[0], encoded[1]))
             track_loss = torch.stack(track_terms).mean() if track_terms else pair_loss.new_tensor(0.0)
             if height_head is not None:
                 height_loss = _height_regression_loss(height_head, torch.cat([za, zb], dim=0), left + right, height_mu, height_sd, device)
             else:
                 height_loss = pair_loss.new_tensor(0.0)
-            loss = pair_loss + args.lambda_cross * cross_loss + args.lambda_track * track_loss + args.lambda_height * height_loss
+            loss = (
+                pair_loss
+                + args.lambda_cross * cross_loss
+                + args.lambda_track * track_loss
+                + args.lambda_id_score * id_score_loss
+                + args.lambda_height * height_loss
+            )
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
             sums["loss"] += float(loss.item())
             sums["pair_loss"] += float(pair_loss.item())
-            sums["cross_loss"] += float(cross_loss.item())
-            sums["track_loss"] += float(track_loss.item())
+            sums["cross_relative_consistency_loss"] += float(cross_loss.item())
+            sums["id_score_consistency_loss"] += float(id_score_loss.item())
+            sums["id_score_consistency_groups"] += float(id_group_count)
+            sums["track_embedding_consistency_loss"] += float(track_loss.item())
             sums["height_loss"] += float(height_loss.item())
-        val_metrics = evaluate(model, labeled["val"], camera_vocab, mu, sd, device, geometry_kwargs)
-        item = {"epoch": epoch, **{key: value / args.steps_per_epoch for key, value in sums.items()}, "val": val_metrics}
-        history.append(item)
-        print("[EPOCH]", json.dumps(item, ensure_ascii=False), flush=True)
-        key = (val_metrics["cross_camera_pairwise_accuracy"] or -1.0, val_metrics["all_pairwise_accuracy"] or -1.0, val_metrics["kendall_tau"] or -1.0)
-        if best is None or key > best["key"]:
-            best = {"key": key, "epoch": epoch, "metrics": val_metrics, "state": {k: v.detach().cpu() for k, v in model.state_dict().items()}}
-    model.load_state_dict(best["state"])
-    legacy_test = evaluate(model, labeled["test"], camera_vocab, mu, sd, device, geometry_kwargs)
-    strict_metrics = evaluate(model, strict_test, camera_vocab, mu, sd, device, geometry_kwargs) if strict_test else {"people": 0, "reason": "no strict test rows"}
+        if ctx.distributed:
+            dist.barrier()
+        if ctx.is_main:
+            val_metrics = evaluate(model_ref, labeled["val"], camera_vocab, mu, sd, device, geometry_kwargs)
+            item = {"epoch": epoch, **{key: value / args.steps_per_epoch for key, value in sums.items()}, "val": val_metrics}
+            history.append(item)
+            print("[EPOCH]", json.dumps(item, ensure_ascii=False), flush=True)
+            key = (val_metrics["cross_camera_pairwise_accuracy"] or -1.0, val_metrics["all_pairwise_accuracy"] or -1.0, val_metrics["kendall_tau"] or -1.0)
+            if best is None or key > best["key"]:
+                best = {"key": key, "epoch": epoch, "metrics": val_metrics, "state": {k: v.detach().cpu() for k, v in model_ref.state_dict().items()}}
+        if ctx.distributed:
+            dist.barrier()
+    if not ctx.is_main:
+        return {"distributed_worker_rank": ctx.rank}
+    if best is None:
+        raise RuntimeError("no best checkpoint was selected")
+    model_ref.load_state_dict(best["state"])
+    legacy_test = evaluate(model_ref, labeled["test"], camera_vocab, mu, sd, device, geometry_kwargs)
+    strict_metrics = evaluate(model_ref, strict_test, camera_vocab, mu, sd, device, geometry_kwargs) if strict_test else {"people": 0, "reason": "no strict test rows"}
     checkpoint = {
         "model_state_dict": best["state"],
         "camera_vocab": camera_vocab,
@@ -426,13 +584,14 @@ def train(args) -> dict:
         "sd": sd,
         "lambda_cross": args.lambda_cross,
         "lambda_track": args.lambda_track,
+        "lambda_id_score": args.lambda_id_score,
         "lambda_height": args.lambda_height,
         "pair_label_mode": args.pair_label_mode,
         "pair_soft_temperature_cm": args.pair_soft_temperature_cm,
         "near_bucket_weights": bucket_weights,
         "height_mu": height_mu,
         "height_sd": height_sd,
-        "height_head_state_dict": {k: v.detach().cpu() for k, v in height_head.state_dict().items()} if height_head is not None else None,
+        "height_head_state_dict": {k: v.detach().cpu() for k, v in height_head_ref.state_dict().items()} if height_head_ref is not None else None,
         "seed": args.seed,
         "best_epoch": best["epoch"],
         "best_val_metrics": best["metrics"],
@@ -456,10 +615,11 @@ def train(args) -> dict:
         "split_counts": {split: len(rows) for split, rows in labeled.items()},
         "split_overlap_summary": overlap,
         "person_split_json": args.person_split_json,
+        "primary_metric_definition": "video-level evaluation: one usable video/NPZ is one independent sample; no person-camera or person-level aggregation for primary metrics",
         "best_epoch": best["epoch"],
         "best_val_metrics": best["metrics"],
-        "legacy_split": legacy_test,
-        "strict_no_train_overlap": strict_metrics,
+        "non_primary_legacy_person_camera_aggregated_split": legacy_test,
+        "non_primary_strict_no_train_overlap_person_camera_aggregated": strict_metrics,
         "duration_seconds": time.time() - started,
         "history": history,
     }
@@ -481,6 +641,7 @@ def main() -> None:
     parser.add_argument("--limit-per-split-camera", type=int, default=0)
     parser.add_argument("--lambda-cross", type=float, default=0.2)
     parser.add_argument("--lambda-track", type=float, default=0.1)
+    parser.add_argument("--lambda-id-score", type=float, default=0.0)
     parser.add_argument("--lambda-height", type=float, default=0.0)
     parser.add_argument("--pair-label-mode", choices=("hard", "soft"), default="hard")
     parser.add_argument("--pair-soft-temperature-cm", type=float, default=3.0)
@@ -495,9 +656,20 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu")
     args = parser.parse_args()
-    payload = train(args)
+    try:
+        payload = train(args)
+    finally:
+        _cleanup_distributed()
+    if "distributed_worker_rank" in payload:
+        return
     print("[OUT]", Path(args.out_dir) / "results.json")
-    print(json.dumps({key: payload[key] for key in ("best_epoch", "best_val_metrics", "legacy_split", "strict_no_train_overlap")}, ensure_ascii=False, indent=2))
+    summary_keys = (
+        "best_epoch",
+        "best_val_metrics",
+        "non_primary_legacy_person_camera_aggregated_split",
+        "non_primary_strict_no_train_overlap_person_camera_aggregated",
+    )
+    print(json.dumps({key: payload[key] for key in summary_keys}, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":

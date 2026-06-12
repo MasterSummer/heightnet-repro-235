@@ -16,6 +16,7 @@ from tools.cross_camera_heightmap_fusion_core import (
     load_npz_frames,
     sample_cross_camera_triplet,
     sample_track_frame_pair,
+    score_identity_consistency_loss,
     soft_copeland_scores,
 )
 
@@ -55,6 +56,41 @@ class CrossCameraFusionTest(unittest.TestCase):
         a = torch.randn(3, model.embedding_dim)
         b = torch.randn(3, model.embedding_dim)
         self.assertTrue(torch.allclose(model.compare_encoded(a, b), -model.compare_encoded(b, a)))
+
+    def test_comparator_is_latent_score_difference(self) -> None:
+        model = CrossCameraFusionRanker(camera_count=2)
+        a = torch.randn(4, model.embedding_dim)
+        b = torch.randn(4, model.embedding_dim)
+
+        expected = (model.score(a) - model.score(b)).squeeze(1)
+
+        self.assertTrue(torch.allclose(model.compare_encoded(a, b), expected))
+
+    def test_forward_score_and_compare_ops_match_explicit_methods(self) -> None:
+        model = CrossCameraFusionRanker(camera_count=2)
+        a = torch.randn(4, model.embedding_dim)
+        b = torch.randn(4, model.embedding_dim)
+
+        self.assertTrue(torch.allclose(model(op="score", embeddings=a), model.score(a).squeeze(1)))
+        self.assertTrue(
+            torch.allclose(
+                model(op="compare_encoded", encoded_a=a, encoded_b=b),
+                model.compare_encoded(a, b),
+            )
+        )
+
+    def test_score_identity_consistency_loss_backpropagates(self) -> None:
+        model = CrossCameraFusionRanker(camera_count=2)
+        embeddings = torch.randn(5, model.embedding_dim, requires_grad=True)
+        person_ids = ["p1", "p1", "p2", "p3", "p3"]
+
+        loss, group_count = score_identity_consistency_loss(model, embeddings, person_ids)
+        loss.backward()
+
+        self.assertEqual(group_count, 2)
+        self.assertGreater(float(loss.item()), 0.0)
+        self.assertIsNotNone(embeddings.grad)
+        self.assertGreater(float(embeddings.grad.abs().sum().item()), 0.0)
 
     def test_unknown_camera_height_is_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "cannot parse camera height"):

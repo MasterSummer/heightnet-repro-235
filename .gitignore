@@ -8,6 +8,8 @@ __pycache__/
 # macOS metadata
 .DS_Store
 ._*
+*.swp
+*.bak*
 
 # Large/generated experiment artifacts
 runs/

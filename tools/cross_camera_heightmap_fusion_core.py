@@ -342,8 +342,53 @@ class CrossCameraFusionRanker(nn.Module):
             camera = torch.cat([camera, camera_geometry.to(camera.device, dtype=camera.dtype)], dim=1)
         return self.fusion(torch.cat([self.tabular(tabular), self.crop(crop), self.camera_context(camera)], dim=1))
 
+    def forward(
+        self,
+        tabular: torch.Tensor | None = None,
+        crop: torch.Tensor | None = None,
+        camera_index: torch.Tensor | None = None,
+        camera_height: torch.Tensor | None = None,
+        camera_geometry: torch.Tensor | None = None,
+        *,
+        op: str = "encode",
+        encoded_a: torch.Tensor | None = None,
+        encoded_b: torch.Tensor | None = None,
+        embeddings: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if op == "compare_encoded":
+            if encoded_a is None or encoded_b is None:
+                raise ValueError("encoded_a and encoded_b are required for op='compare_encoded'")
+            return self.compare_encoded(encoded_a, encoded_b)
+        if op == "score":
+            if embeddings is None:
+                raise ValueError("embeddings is required for op='score'")
+            return self.score(embeddings).squeeze(1)
+        if tabular is None or crop is None or camera_index is None or camera_height is None:
+            raise ValueError("tabular, crop, camera_index, and camera_height are required for op='encode'")
+        return self.encode(tabular, crop, camera_index, camera_height, camera_geometry)
+
     def compare_encoded(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
         return (self.score(a) - self.score(b)).squeeze(1)
+
+
+def score_identity_consistency_loss(
+    model: CrossCameraFusionRanker,
+    embeddings: torch.Tensor,
+    person_ids: list[str],
+) -> tuple[torch.Tensor, int]:
+    if embeddings.shape[0] != len(person_ids):
+        raise ValueError(f"embeddings/person_ids length mismatch: {embeddings.shape[0]} vs {len(person_ids)}")
+    scores = model.score(embeddings).squeeze(1)
+    losses: list[torch.Tensor] = []
+    for person_id in sorted(set(str(pid) for pid in person_ids)):
+        indices = [idx for idx, pid in enumerate(person_ids) if str(pid) == person_id]
+        if len(indices) < 2:
+            continue
+        group = scores[torch.tensor(indices, dtype=torch.long, device=scores.device)]
+        losses.append(((group - group.mean()) ** 2).mean())
+    if not losses:
+        return scores.sum() * 0.0, 0
+    return torch.stack(losses).mean(), len(losses)
 
 
 def soft_copeland_scores(
