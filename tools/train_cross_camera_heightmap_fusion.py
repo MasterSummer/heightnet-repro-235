@@ -411,11 +411,14 @@ def evaluate_video_level_records(compare_fn, score_fn, records: list[dict], devi
         person_embeddings[record["person_id"]].append(record["embedding"])
         person_heights[record["person_id"]] = record["height_cm"]
     with torch.no_grad():
+        record_embeddings = torch.stack([record["embedding"] for record in records]).to(device)
+        record_scores = score_fn(record_embeddings).detach().cpu().tolist()
         for i, left in enumerate(records):
-            for right in records[i + 1:]:
+            left_score = float(record_scores[i])
+            for j, right in enumerate(records[i + 1:], start=i + 1):
                 if left["person_id"] == right["person_id"] or left["height_cm"] == right["height_cm"]:
                     continue
-                logit = float(compare_fn(left["embedding"][None].to(device), right["embedding"][None].to(device)).item())
+                logit = left_score - float(record_scores[j])
                 expected = left["height_cm"] > right["height_cm"]
                 ok = (logit > 0) == expected
                 relation = "same_camera" if left["camera_id"] == right["camera_id"] else "cross_camera"
