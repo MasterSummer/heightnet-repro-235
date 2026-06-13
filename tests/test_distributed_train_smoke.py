@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from tools.train_cross_camera_heightmap_fusion import (
     _distributed_context_from_env,
     _sample_identity_consistency_rows,
+    evaluate_video_level_records,
 )
 
 
@@ -41,6 +42,21 @@ class DistributedTrainSmokeTest(unittest.TestCase):
         self.assertEqual(len(sampled), 4)
         self.assertTrue(all(people.count(person_id) == 2 for person_id in set(people)))
         self.assertNotIn("p3", people)
+
+    def test_video_level_evaluation_counts_each_video_independently(self) -> None:
+        records = [
+            {"sequence_id": "p1__a", "person_id": "p1", "camera_id": "2d5_0", "height_cm": 180.0, "embedding": torch.tensor([4.0])},
+            {"sequence_id": "p1__b", "person_id": "p1", "camera_id": "2d5_0", "height_cm": 180.0, "embedding": torch.tensor([3.5])},
+            {"sequence_id": "p2__a", "person_id": "p2", "camera_id": "2d5_0", "height_cm": 170.0, "embedding": torch.tensor([2.0])},
+            {"sequence_id": "p3__a", "person_id": "p3", "camera_id": "3d5_0", "height_cm": 160.0, "embedding": torch.tensor([1.0])},
+        ]
+
+        metrics = evaluate_video_level_records(lambda a, b: (a[:, 0] - b[:, 0]), lambda x: x[:, 0], records, torch.device("cpu"))
+
+        self.assertEqual(metrics["sample_unit"], "video")
+        self.assertEqual(metrics["video_records"], 4)
+        self.assertEqual(metrics["pair_counts"], {"all": 5, "same_camera": 2, "cross_camera": 3})
+        self.assertEqual(metrics["all_pairwise_accuracy"], 1.0)
 
 
 if __name__ == "__main__":

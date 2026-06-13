@@ -369,7 +369,27 @@ def _person_camera_records(model, rows, camera_vocab, mu, sd, device, geometry_k
     ]
 
 
-def _bisect_hit_rate(records: list[dict], scores: dict[str, float]) -> float | None:
+def _video_records(model, rows, camera_vocab, mu, sd, device, geometry_kwargs: dict | None = None) -> list[dict]:
+    model.eval()
+    records: list[dict] = []
+    with torch.no_grad():
+        for start in range(0, len(rows), 128):
+            batch = rows[start:start + 128]
+            encoded = _encode_rows(model, batch, camera_vocab, mu, sd, device, geometry_kwargs).cpu()
+            for row, embedding in zip(batch, encoded):
+                records.append(
+                    {
+                        "sequence_id": row.get("sequence_id") or f"{row['person_id']}__{row['video_stem']}",
+                        "person_id": row["person_id"],
+                        "camera_id": row["camera_id"],
+                        "height_cm": float(row["height_cm"]),
+                        "embedding": embedding,
+                    }
+                )
+    return records
+
+
+def _bisect_hit_rate_by_person(records: list[dict], scores: dict[str, float]) -> float | None:
     people = sorted(scores, key=lambda pid: (-scores[pid], pid))
     if len(people) < 2:
         return None
@@ -381,8 +401,7 @@ def _bisect_hit_rate(records: list[dict], scores: dict[str, float]) -> float | N
     return float(sum((pid in pred_high) == (pid in truth_high) for pid in people) / len(people))
 
 
-def evaluate(model, rows, camera_vocab, mu, sd, device, geometry_kwargs: dict | None = None) -> dict:
-    records = _person_camera_records(model, rows, camera_vocab, mu, sd, device, geometry_kwargs)
+def evaluate_video_level_records(compare_fn, score_fn, records: list[dict], device: torch.device) -> dict:
     correct = {"all": 0, "same_camera": 0, "cross_camera": 0}
     total = {"all": 0, "same_camera": 0, "cross_camera": 0}
     buckets = {"lt3": [0, 0], "3to5": [0, 0], "5to8": [0, 0], "ge8": [0, 0]}
@@ -391,13 +410,12 @@ def evaluate(model, rows, camera_vocab, mu, sd, device, geometry_kwargs: dict | 
     for record in records:
         person_embeddings[record["person_id"]].append(record["embedding"])
         person_heights[record["person_id"]] = record["height_cm"]
-    model.eval()
     with torch.no_grad():
         for i, left in enumerate(records):
             for right in records[i + 1:]:
                 if left["person_id"] == right["person_id"] or left["height_cm"] == right["height_cm"]:
                     continue
-                logit = float(model.compare_encoded(left["embedding"][None].to(device), right["embedding"][None].to(device)).item())
+                logit = float(compare_fn(left["embedding"][None].to(device), right["embedding"][None].to(device)).item())
                 expected = left["height_cm"] > right["height_cm"]
                 ok = (logit > 0) == expected
                 relation = "same_camera" if left["camera_id"] == right["camera_id"] else "cross_camera"
@@ -410,24 +428,38 @@ def evaluate(model, rows, camera_vocab, mu, sd, device, geometry_kwargs: dict | 
                 buckets[bucket][0] += int(ok)
         people = sorted(person_embeddings)
         embeddings = torch.stack([torch.stack(person_embeddings[pid]).mean(0) for pid in people]).to(device)
-        latent = model.score(embeddings).squeeze(1).cpu().tolist()
+        latent = score_fn(embeddings).cpu().tolist()
     heights = [person_heights[pid] for pid in people]
     scores = dict(zip(people, latent))
     return {
+        "sample_unit": "video",
         "people": len(people),
-        "person_camera_records": len(records),
+        "video_records": len(records),
         "all_pairwise_accuracy": correct["all"] / total["all"] if total["all"] else None,
         "same_camera_pairwise_accuracy": correct["same_camera"] / total["same_camera"] if total["same_camera"] else None,
         "cross_camera_pairwise_accuracy": correct["cross_camera"] / total["cross_camera"] if total["cross_camera"] else None,
         "pair_counts": total,
         "spearman": correlation(rankdata(latent), rankdata(heights)),
         "kendall_tau": float(kendalltau(latent, heights).statistic) if len(people) >= 2 else None,
-        "bisect_hit_rate": _bisect_hit_rate(records, scores),
+        "bisect_hit_rate": _bisect_hit_rate_by_person(records, scores),
         "height_gap_bucket_pairwise_accuracy": {
             key: {"accuracy": values[0] / values[1] if values[1] else None, "pairs": values[1]}
             for key, values in buckets.items()
         },
     }
+
+
+def evaluate(model, rows, camera_vocab, mu, sd, device, geometry_kwargs: dict | None = None) -> dict:
+    records = _video_records(model, rows, camera_vocab, mu, sd, device, geometry_kwargs)
+    return evaluate_video_level_records(model.compare_encoded, lambda x: model.score(x).squeeze(1), records, device)
+
+
+def evaluate_person_camera_aggregated(model, rows, camera_vocab, mu, sd, device, geometry_kwargs: dict | None = None) -> dict:
+    records = _person_camera_records(model, rows, camera_vocab, mu, sd, device, geometry_kwargs)
+    metrics = evaluate_video_level_records(model.compare_encoded, lambda x: model.score(x).squeeze(1), records, device)
+    metrics["sample_unit"] = "person_camera"
+    metrics["person_camera_records"] = metrics.pop("video_records")
+    return metrics
 
 
 def train(args) -> dict:
@@ -574,8 +606,9 @@ def train(args) -> dict:
     if best is None:
         raise RuntimeError("no best checkpoint was selected")
     model_ref.load_state_dict(best["state"])
-    legacy_test = evaluate(model_ref, labeled["test"], camera_vocab, mu, sd, device, geometry_kwargs)
-    strict_metrics = evaluate(model_ref, strict_test, camera_vocab, mu, sd, device, geometry_kwargs) if strict_test else {"people": 0, "reason": "no strict test rows"}
+    primary_test = evaluate(model_ref, labeled["test"], camera_vocab, mu, sd, device, geometry_kwargs)
+    legacy_test = evaluate_person_camera_aggregated(model_ref, labeled["test"], camera_vocab, mu, sd, device, geometry_kwargs)
+    strict_metrics = evaluate_person_camera_aggregated(model_ref, strict_test, camera_vocab, mu, sd, device, geometry_kwargs) if strict_test else {"people": 0, "reason": "no strict test rows"}
     checkpoint = {
         "model_state_dict": best["state"],
         "camera_vocab": camera_vocab,
@@ -618,6 +651,7 @@ def train(args) -> dict:
         "primary_metric_definition": "video-level evaluation: one usable video/NPZ is one independent sample; no person-camera or person-level aggregation for primary metrics",
         "best_epoch": best["epoch"],
         "best_val_metrics": best["metrics"],
+        "primary_test_video_level": primary_test,
         "non_primary_legacy_person_camera_aggregated_split": legacy_test,
         "non_primary_strict_no_train_overlap_person_camera_aggregated": strict_metrics,
         "duration_seconds": time.time() - started,
