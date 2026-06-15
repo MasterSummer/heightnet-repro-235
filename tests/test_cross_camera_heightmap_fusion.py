@@ -14,9 +14,12 @@ from tools.cross_camera_heightmap_fusion_core import (
     filter_labeled_rows,
     filter_strict_no_train_overlap,
     load_npz_frames,
+    margin_ranking_loss_from_scores,
     sample_cross_camera_triplet,
     sample_track_frame_pair,
     score_identity_consistency_loss,
+    score_identity_consistency_loss_by_camera,
+    score_variance_loss,
     soft_copeland_scores,
 )
 
@@ -91,6 +94,52 @@ class CrossCameraFusionTest(unittest.TestCase):
         self.assertGreater(float(loss.item()), 0.0)
         self.assertIsNotNone(embeddings.grad)
         self.assertGreater(float(embeddings.grad.abs().sum().item()), 0.0)
+
+    def test_same_camera_score_identity_consistency_groups_by_person_and_camera(self) -> None:
+        model = CrossCameraFusionRanker(camera_count=2)
+        embeddings = torch.randn(6, model.embedding_dim, requires_grad=True)
+        person_ids = ["p1", "p1", "p1", "p2", "p2", "p3"]
+        camera_ids = ["2d5_0", "2d5_0", "3d5_0", "2d5_0", "2d5_0", "2d5_0"]
+
+        loss, group_count = score_identity_consistency_loss_by_camera(model, embeddings, person_ids, camera_ids)
+        loss.backward()
+
+        self.assertEqual(group_count, 2)
+        self.assertIsNotNone(embeddings.grad)
+        self.assertGreater(float(embeddings.grad.abs().sum().item()), 0.0)
+
+    def test_track_score_variance_loss_backpropagates(self) -> None:
+        scores = torch.tensor([1.0, 1.5, 2.0], requires_grad=True)
+
+        loss = score_variance_loss(scores)
+        loss.backward()
+
+        self.assertGreater(float(loss.item()), 0.0)
+        self.assertIsNotNone(scores.grad)
+        self.assertGreater(float(scores.grad.abs().sum().item()), 0.0)
+
+    def test_margin_ranking_loss_filters_near_pairs_and_scales_by_height_gap(self) -> None:
+        left_scores = torch.tensor([1.0, 1.2, 1.0], requires_grad=True)
+        right_scores = torch.tensor([0.0, 1.0, 2.0], requires_grad=True)
+        left_heights = torch.tensor([180.0, 171.0, 160.0])
+        right_heights = torch.tensor([170.0, 169.0, 175.0])
+
+        loss, used_count, margins = margin_ranking_loss_from_scores(
+            left_scores,
+            right_scores,
+            left_heights,
+            right_heights,
+            min_hard_gap_cm=3.0,
+            margin_tau_cm=5.0,
+            margin_max=2.0,
+        )
+        loss.backward()
+
+        self.assertEqual(used_count, 2)
+        self.assertTrue(torch.allclose(margins, torch.tensor([2.0, 2.0])))
+        self.assertGreater(float(loss.item()), 0.0)
+        self.assertIsNotNone(left_scores.grad)
+        self.assertGreater(float(left_scores.grad.abs().sum().item()), 0.0)
 
     def test_unknown_camera_height_is_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "cannot parse camera height"):

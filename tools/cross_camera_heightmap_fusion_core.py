@@ -391,6 +391,68 @@ def score_identity_consistency_loss(
     return torch.stack(losses).mean(), len(losses)
 
 
+def score_identity_consistency_loss_by_camera(
+    model: CrossCameraFusionRanker,
+    embeddings: torch.Tensor,
+    person_ids: list[str],
+    camera_ids: list[str],
+) -> tuple[torch.Tensor, int]:
+    if embeddings.shape[0] != len(person_ids) or embeddings.shape[0] != len(camera_ids):
+        raise ValueError(
+            f"embeddings/person_ids/camera_ids length mismatch: {embeddings.shape[0]} vs {len(person_ids)} vs {len(camera_ids)}"
+        )
+    scores = model.score(embeddings).squeeze(1)
+    losses: list[torch.Tensor] = []
+    keys = sorted({(str(pid), str(cam)) for pid, cam in zip(person_ids, camera_ids)})
+    for person_id, camera_id in keys:
+        indices = [
+            idx
+            for idx, (pid, cam) in enumerate(zip(person_ids, camera_ids))
+            if str(pid) == person_id and str(cam) == camera_id
+        ]
+        if len(indices) < 2:
+            continue
+        group = scores[torch.tensor(indices, dtype=torch.long, device=scores.device)]
+        losses.append(score_variance_loss(group))
+    if not losses:
+        return scores.sum() * 0.0, 0
+    return torch.stack(losses).mean(), len(losses)
+
+
+def score_variance_loss(scores: torch.Tensor) -> torch.Tensor:
+    if scores.ndim != 1:
+        scores = scores.reshape(-1)
+    if scores.numel() < 2:
+        return scores.sum() * 0.0
+    return ((scores - scores.mean()) ** 2).mean()
+
+
+def margin_ranking_loss_from_scores(
+    left_scores: torch.Tensor,
+    right_scores: torch.Tensor,
+    left_heights_cm: torch.Tensor,
+    right_heights_cm: torch.Tensor,
+    *,
+    min_hard_gap_cm: float,
+    margin_tau_cm: float,
+    margin_max: float,
+) -> tuple[torch.Tensor, int, torch.Tensor]:
+    if margin_tau_cm <= 0:
+        raise ValueError("margin_tau_cm must be positive")
+    if margin_max <= 0:
+        raise ValueError("margin_max must be positive")
+    diffs = left_heights_cm.to(left_scores.device, dtype=left_scores.dtype) - right_heights_cm.to(left_scores.device, dtype=left_scores.dtype)
+    gaps = diffs.abs()
+    mask = gaps >= float(min_hard_gap_cm)
+    if not bool(mask.any()):
+        return (left_scores - right_scores).sum() * 0.0, 0, left_scores.new_empty((0,))
+    signs = torch.where(diffs[mask] > 0, 1.0, -1.0).to(left_scores.device, dtype=left_scores.dtype)
+    margins = torch.clamp(gaps[mask] / float(margin_tau_cm), max=float(margin_max))
+    signed_gaps = signs * (left_scores[mask] - right_scores[mask])
+    losses = torch.relu(margins - signed_gaps)
+    return losses.mean(), int(mask.sum().item()), margins.detach().cpu()
+
+
 def soft_copeland_scores(
     embeddings: torch.Tensor,
     compare_fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],

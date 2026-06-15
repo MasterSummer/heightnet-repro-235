@@ -33,10 +33,13 @@ from tools.cross_camera_heightmap_fusion_core import (
     load_height_labels,
     load_npz_frames,
     load_split_rows,
+    margin_ranking_loss_from_scores,
     rankdata,
     sample_cross_camera_triplet,
     sample_track_frame_pair,
     score_identity_consistency_loss,
+    score_identity_consistency_loss_by_camera,
+    score_variance_loss,
 )
 
 
@@ -103,6 +106,12 @@ def _compare_encoded_for_training(model, a: torch.Tensor, b: torch.Tensor) -> to
     return model.compare_encoded(a, b)
 
 
+def _score_for_training(model, embeddings: torch.Tensor) -> torch.Tensor:
+    if hasattr(model, "module"):
+        return model(op="score", embeddings=embeddings)
+    return model.score(embeddings).squeeze(1)
+
+
 def _score_identity_consistency_loss_for_training(
     model,
     embeddings: torch.Tensor,
@@ -123,6 +132,36 @@ def _score_identity_consistency_loss_for_training(
             return scores.sum() * 0.0, 0
         return torch.stack(losses).mean(), len(losses)
     return score_identity_consistency_loss(model, embeddings, person_ids)
+
+
+def _score_identity_consistency_loss_by_camera_for_training(
+    model,
+    embeddings: torch.Tensor,
+    person_ids: list[str],
+    camera_ids: list[str],
+) -> tuple[torch.Tensor, int]:
+    if hasattr(model, "module"):
+        if embeddings.shape[0] != len(person_ids) or embeddings.shape[0] != len(camera_ids):
+            raise ValueError(
+                f"embeddings/person_ids/camera_ids length mismatch: {embeddings.shape[0]} vs {len(person_ids)} vs {len(camera_ids)}"
+            )
+        scores = model(op="score", embeddings=embeddings)
+        losses: list[torch.Tensor] = []
+        keys = sorted({(str(pid), str(cam)) for pid, cam in zip(person_ids, camera_ids)})
+        for person_id, camera_id in keys:
+            indices = [
+                idx
+                for idx, (pid, cam) in enumerate(zip(person_ids, camera_ids))
+                if str(pid) == person_id and str(cam) == camera_id
+            ]
+            if len(indices) < 2:
+                continue
+            group = scores[torch.tensor(indices, dtype=torch.long, device=scores.device)]
+            losses.append(score_variance_loss(group))
+        if not losses:
+            return scores.sum() * 0.0, 0
+        return torch.stack(losses).mean(), len(losses)
+    return score_identity_consistency_loss_by_camera(model, embeddings, person_ids, camera_ids)
 
 
 def _load_rows(data_root: Path, feature_root: Path, limit_per_split_camera: int) -> dict[str, list[dict]]:
@@ -247,11 +286,22 @@ def _frame_tensors(row: dict, frame_indices: list[int], camera_vocab: dict[str, 
     return tuple(tensors)
 
 
-def _pick_supervised_pairs(rows: list[dict], batch_size: int, rng: np.random.Generator) -> tuple[list[dict], list[dict], torch.Tensor]:
+def _pick_supervised_pairs(
+    rows: list[dict],
+    batch_size: int,
+    rng: np.random.Generator,
+    min_gap_cm: float = 0.0,
+) -> tuple[list[dict], list[dict], torch.Tensor]:
     left, right, labels = [], [], []
+    attempts = 0
+    max_attempts = max(1000, batch_size * 200)
     while len(left) < batch_size:
+        attempts += 1
+        if attempts > max_attempts:
+            raise ValueError(f"could not sample {batch_size} supervised pairs with min_gap_cm={min_gap_cm}")
         a, b = rng.choice(rows, size=2, replace=False)
-        if a["person_id"] == b["person_id"] or a["height_cm"] == b["height_cm"]:
+        gap_cm = abs(float(a["height_cm"]) - float(b["height_cm"]))
+        if a["person_id"] == b["person_id"] or gap_cm == 0.0 or gap_cm < float(min_gap_cm):
             continue
         left.append(a)
         right.append(b)
@@ -276,6 +326,25 @@ def _sample_identity_consistency_rows(rows: list[dict], group_count: int, rng: n
         items = by_person[person_id]
         indices = rng.choice(len(items), size=2, replace=False)
         sampled.extend([items[int(indices[0])], items[int(indices[1])]])
+    return sampled
+
+
+def _sample_same_camera_identity_consistency_rows(rows: list[dict], group_count: int, rng: np.random.Generator) -> list[dict]:
+    if group_count <= 0:
+        return []
+    by_person_camera: dict[tuple[str, str], list[dict]] = defaultdict(list)
+    for row in rows:
+        by_person_camera[(str(row["person_id"]), str(row["camera_id"]))].append(row)
+    eligible = [key for key, items in by_person_camera.items() if len(items) >= 2]
+    if not eligible:
+        return []
+    replace_groups = group_count > len(eligible)
+    chosen_indices = rng.choice(len(eligible), size=group_count, replace=replace_groups)
+    sampled: list[dict] = []
+    for index in chosen_indices:
+        items = by_person_camera[eligible[int(index)]]
+        row_indices = rng.choice(len(items), size=2, replace=False)
+        sampled.extend([items[int(row_indices[0])], items[int(row_indices[1])]])
     return sampled
 
 
@@ -539,11 +608,26 @@ def train(args) -> dict:
             height_head.train()
         sums = defaultdict(float)
         for _ in range(args.steps_per_epoch):
-            left, right, _ = _pick_supervised_pairs(labeled["train"], args.batch_size, rng)
+            left, right, _ = _pick_supervised_pairs(labeled["train"], args.batch_size, rng, args.min_hard_gap_cm)
             targets, pair_weights = _pair_targets_and_weights(left, right, args.pair_label_mode, args.pair_soft_temperature_cm, bucket_weights)
             za = _encode_rows(model, left, camera_vocab, mu, sd, device, geometry_kwargs)
             zb = _encode_rows(model, right, camera_vocab, mu, sd, device, geometry_kwargs)
-            pair_loss = _weighted_bce_with_logits(_compare_encoded_for_training(model, za, zb), targets.to(device), pair_weights.to(device))
+            logits = _compare_encoded_for_training(model, za, zb)
+            rank_bce_loss = _weighted_bce_with_logits(logits, targets.to(device), pair_weights.to(device))
+            left_scores = _score_for_training(model, za)
+            right_scores = _score_for_training(model, zb)
+            left_heights = torch.tensor([float(row["height_cm"]) for row in left], dtype=torch.float32, device=device)
+            right_heights = torch.tensor([float(row["height_cm"]) for row in right], dtype=torch.float32, device=device)
+            margin_loss, margin_pair_count, margin_values = margin_ranking_loss_from_scores(
+                left_scores,
+                right_scores,
+                left_heights,
+                right_heights,
+                min_hard_gap_cm=args.min_hard_gap_cm,
+                margin_tau_cm=args.margin_tau_cm,
+                margin_max=args.margin_max,
+            )
+            pair_loss = args.lambda_margin * margin_loss + args.lambda_rank_bce * rank_bce_loss
             cross_terms = []
             for _ in range(args.consistency_batch_size):
                 a, ap, b = sample_cross_camera_triplet(labeled["train"], rng)
@@ -556,10 +640,28 @@ def train(args) -> dict:
             if id_rows and args.lambda_id_score > 0:
                 id_embeddings = _encode_rows(model, id_rows, camera_vocab, mu, sd, device, geometry_kwargs)
                 id_person_ids = [str(row["person_id"]) for row in id_rows]
+            else:
+                id_embeddings = None
+                id_person_ids = []
+            if id_embeddings is not None and args.lambda_id_score > 0:
                 id_score_loss, id_group_count = _score_identity_consistency_loss_for_training(model, id_embeddings, id_person_ids)
             else:
                 id_score_loss = pair_loss.new_tensor(0.0)
                 id_group_count = 0
+            same_camera_rows = _sample_same_camera_identity_consistency_rows(labeled["train"], args.consistency_batch_size, rng)
+            if same_camera_rows and args.lambda_id_same_camera > 0:
+                same_camera_embeddings = _encode_rows(model, same_camera_rows, camera_vocab, mu, sd, device, geometry_kwargs)
+                same_camera_person_ids = [str(row["person_id"]) for row in same_camera_rows]
+                same_camera_ids = [str(row["camera_id"]) for row in same_camera_rows]
+                same_camera_id_loss, same_camera_id_group_count = _score_identity_consistency_loss_by_camera_for_training(
+                    model,
+                    same_camera_embeddings,
+                    same_camera_person_ids,
+                    same_camera_ids,
+                )
+            else:
+                same_camera_id_loss = pair_loss.new_tensor(0.0)
+                same_camera_id_group_count = 0
             track_terms = []
             track_rows = rng.choice(labeled["train"], size=args.track_batch_size, replace=True)
             for row in track_rows:
@@ -569,8 +671,8 @@ def train(args) -> dict:
                 i, j = sample_track_frame_pair(frames.count, rng)
                 tensors = _frame_tensors(row, [i, j], camera_vocab, mu, sd, device, geometry_kwargs)
                 encoded = model(*tensors)
-                track_terms.append(F.mse_loss(encoded[0], encoded[1]))
-            track_loss = torch.stack(track_terms).mean() if track_terms else pair_loss.new_tensor(0.0)
+                track_terms.append(score_variance_loss(_score_for_training(model, encoded)))
+            track_score_loss = torch.stack(track_terms).mean() if track_terms else pair_loss.new_tensor(0.0)
             if height_head is not None:
                 height_loss = _height_regression_loss(height_head, torch.cat([za, zb], dim=0), left + right, height_mu, height_sd, device)
             else:
@@ -578,8 +680,9 @@ def train(args) -> dict:
             loss = (
                 pair_loss
                 + args.lambda_cross * cross_loss
-                + args.lambda_track * track_loss
+                + args.lambda_track_score * track_score_loss
                 + args.lambda_id_score * id_score_loss
+                + args.lambda_id_same_camera * same_camera_id_loss
                 + args.lambda_height * height_loss
             )
             optimizer.zero_grad()
@@ -587,10 +690,16 @@ def train(args) -> dict:
             optimizer.step()
             sums["loss"] += float(loss.item())
             sums["pair_loss"] += float(pair_loss.item())
+            sums["margin_ranking_loss"] += float(margin_loss.item())
+            sums["rank_bce_loss"] += float(rank_bce_loss.item())
+            sums["margin_pair_count"] += float(margin_pair_count)
+            sums["margin_mean"] += float(margin_values.mean().item()) if margin_values.numel() else 0.0
             sums["cross_relative_consistency_loss"] += float(cross_loss.item())
             sums["id_score_consistency_loss"] += float(id_score_loss.item())
             sums["id_score_consistency_groups"] += float(id_group_count)
-            sums["track_embedding_consistency_loss"] += float(track_loss.item())
+            sums["id_same_camera_score_consistency_loss"] += float(same_camera_id_loss.item())
+            sums["id_same_camera_score_consistency_groups"] += float(same_camera_id_group_count)
+            sums["track_score_consistency_loss"] += float(track_score_loss.item())
             sums["height_loss"] += float(height_loss.item())
         if ctx.distributed:
             dist.barrier()
@@ -619,9 +728,16 @@ def train(args) -> dict:
         "mu": mu,
         "sd": sd,
         "lambda_cross": args.lambda_cross,
-        "lambda_track": args.lambda_track,
+        "lambda_track": args.lambda_track_score,
+        "lambda_track_score": args.lambda_track_score,
         "lambda_id_score": args.lambda_id_score,
+        "lambda_id_same_camera": args.lambda_id_same_camera,
         "lambda_height": args.lambda_height,
+        "lambda_margin": args.lambda_margin,
+        "lambda_rank_bce": args.lambda_rank_bce,
+        "min_hard_gap_cm": args.min_hard_gap_cm,
+        "margin_tau_cm": args.margin_tau_cm,
+        "margin_max": args.margin_max,
         "pair_label_mode": args.pair_label_mode,
         "pair_soft_temperature_cm": args.pair_soft_temperature_cm,
         "near_bucket_weights": bucket_weights,
@@ -677,9 +793,15 @@ def main() -> None:
     parser.add_argument("--track-batch-size", type=int, default=8)
     parser.add_argument("--limit-per-split-camera", type=int, default=0)
     parser.add_argument("--lambda-cross", type=float, default=0.2)
-    parser.add_argument("--lambda-track", type=float, default=0.1)
+    parser.add_argument("--lambda-track", "--lambda-track-score", dest="lambda_track_score", type=float, default=0.2)
     parser.add_argument("--lambda-id-score", type=float, default=0.0)
+    parser.add_argument("--lambda-id-same-camera", type=float, default=0.2)
     parser.add_argument("--lambda-height", type=float, default=0.0)
+    parser.add_argument("--lambda-margin", type=float, default=1.0)
+    parser.add_argument("--lambda-rank-bce", type=float, default=0.0)
+    parser.add_argument("--min-hard-gap-cm", type=float, default=3.0)
+    parser.add_argument("--margin-tau-cm", type=float, default=6.0)
+    parser.add_argument("--margin-max", type=float, default=2.0)
     parser.add_argument("--pair-label-mode", choices=("hard", "soft"), default="hard")
     parser.add_argument("--pair-soft-temperature-cm", type=float, default=3.0)
     parser.add_argument("--near-bucket-weights", default="lt3=1.0,3to5=1.0,5to8=1.0,ge8=1.0")

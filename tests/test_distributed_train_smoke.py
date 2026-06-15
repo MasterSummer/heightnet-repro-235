@@ -11,7 +11,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tools.train_cross_camera_heightmap_fusion import (
     _distributed_context_from_env,
+    _pick_supervised_pairs,
     _sample_identity_consistency_rows,
+    _sample_same_camera_identity_consistency_rows,
     evaluate_video_level_records,
 )
 
@@ -42,6 +44,32 @@ class DistributedTrainSmokeTest(unittest.TestCase):
         self.assertEqual(len(sampled), 4)
         self.assertTrue(all(people.count(person_id) == 2 for person_id in set(people)))
         self.assertNotIn("p3", people)
+
+    def test_same_camera_identity_sampler_returns_repeated_person_camera_groups(self) -> None:
+        rows = [
+            {"person_id": "p1", "camera_id": "2d5_0", "npz_path": "a"},
+            {"person_id": "p1", "camera_id": "2d5_0", "npz_path": "b"},
+            {"person_id": "p1", "camera_id": "3d5_0", "npz_path": "c"},
+            {"person_id": "p2", "camera_id": "2d5_0", "npz_path": "d"},
+            {"person_id": "p2", "camera_id": "2d5_0", "npz_path": "e"},
+        ]
+
+        sampled = _sample_same_camera_identity_consistency_rows(rows, group_count=2, rng=np.random.default_rng(4))
+        keys = [(row["person_id"], row["camera_id"]) for row in sampled]
+
+        self.assertEqual(len(sampled), 4)
+        self.assertTrue(all(keys.count(key) == 2 for key in set(keys)))
+
+    def test_supervised_pair_sampler_skips_near_height_pairs(self) -> None:
+        rows = [
+            {"person_id": "p1", "height_cm": 180.0},
+            {"person_id": "p2", "height_cm": 178.0},
+            {"person_id": "p3", "height_cm": 170.0},
+        ]
+
+        left, right, _ = _pick_supervised_pairs(rows, batch_size=8, rng=np.random.default_rng(3), min_gap_cm=3.0)
+
+        self.assertTrue(all(abs(float(a["height_cm"]) - float(b["height_cm"])) >= 3.0 for a, b in zip(left, right)))
 
     def test_video_level_evaluation_counts_each_video_independently(self) -> None:
         records = [
