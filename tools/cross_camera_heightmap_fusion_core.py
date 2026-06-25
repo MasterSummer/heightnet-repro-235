@@ -312,16 +312,97 @@ class CropEncoder(nn.Module):
         return self.net(crop)
 
 
+class GeoVerticalTrackEncoder(nn.Module):
+    """Encode heightmap tracks with a vertical geometry bias."""
+
+    def __init__(self, out_dim: int = 64, frame_dim: int = 64):
+        super().__init__()
+        self.frame_dim = int(frame_dim)
+        self.spatial = nn.Sequential(
+            nn.Conv2d(1, 16, (7, 3), stride=(2, 1), padding=(3, 1), bias=False),
+            nn.GroupNorm(1, 16),
+            nn.ReLU(inplace=True),
+            ResidualBlock(16),
+            nn.Conv2d(16, 32, (5, 3), stride=(2, 2), padding=(2, 1), bias=False),
+            nn.GroupNorm(1, 32),
+            nn.ReLU(inplace=True),
+            ResidualBlock(32),
+            nn.Conv2d(32, 48, (3, 3), stride=(2, 2), padding=1, bias=False),
+            nn.GroupNorm(1, 48),
+            nn.ReLU(inplace=True),
+        )
+        self.vertical_profile = nn.Sequential(
+            nn.Conv1d(48, 64, 3, padding=1, bias=False),
+            nn.GroupNorm(1, 64),
+            nn.ReLU(inplace=True),
+            nn.Conv1d(64, 64, 3, padding=1, bias=False),
+            nn.GroupNorm(1, 64),
+            nn.ReLU(inplace=True),
+        )
+        self.frame_projection = nn.Sequential(
+            nn.Linear(64 * 2, self.frame_dim),
+            nn.ReLU(inplace=True),
+        )
+        self.attention = nn.Sequential(
+            nn.Linear(self.frame_dim, 32),
+            nn.Tanh(),
+            nn.Linear(32, 1),
+        )
+        self.out = nn.Sequential(
+            nn.Linear(self.frame_dim * 2, out_dim),
+            nn.ReLU(inplace=True),
+        )
+
+    def encode_frames(self, crop: torch.Tensor) -> torch.Tensor:
+        if crop.ndim != 4:
+            raise ValueError(f"frame crop must have shape (N, 1, 128, 64), got {tuple(crop.shape)}")
+        features = self.spatial(crop)
+        profile = features.mean(dim=3)
+        profile = self.vertical_profile(profile)
+        pooled = torch.cat([profile.mean(dim=2), profile.amax(dim=2)], dim=1)
+        return self.frame_projection(pooled)
+
+    def pool_frames(self, frame_features: torch.Tensor) -> torch.Tensor:
+        if frame_features.ndim != 3:
+            raise ValueError(f"frame features must have shape (B, T, C), got {tuple(frame_features.shape)}")
+        weights = torch.softmax(self.attention(frame_features).squeeze(-1), dim=1)
+        attended = (frame_features * weights.unsqueeze(-1)).sum(dim=1)
+        robust = frame_features.median(dim=1).values
+        return self.out(torch.cat([attended, robust], dim=1))
+
+    def forward(self, crop: torch.Tensor) -> torch.Tensor:
+        if crop.ndim == 4:
+            return self.pool_frames(self.encode_frames(crop).unsqueeze(1))
+        if crop.ndim != 5:
+            raise ValueError(f"track crop must have shape (B, T, 1, 128, 64), got {tuple(crop.shape)}")
+        batch, frames = int(crop.shape[0]), int(crop.shape[1])
+        frame_features = self.encode_frames(crop.reshape(batch * frames, *crop.shape[2:])).reshape(batch, frames, self.frame_dim)
+        return self.pool_frames(frame_features)
+
+
 class CrossCameraFusionRanker(nn.Module):
-    def __init__(self, camera_count: int, tabular_dim: int = 9, embedding_dim: int = 96, camera_geometry_dim: int = 0):
+    def __init__(
+        self,
+        camera_count: int,
+        tabular_dim: int = 9,
+        embedding_dim: int = 96,
+        camera_geometry_dim: int = 0,
+        crop_encoder: str = "cnn",
+    ):
         super().__init__()
         self.embedding_dim = embedding_dim
         self.camera_geometry_dim = int(camera_geometry_dim)
+        self.crop_encoder_name = str(crop_encoder)
         self.tabular = nn.Sequential(
             nn.Linear(tabular_dim, 64), nn.ReLU(inplace=True),
             nn.Linear(64, 48), nn.ReLU(inplace=True),
         )
-        self.crop = CropEncoder(48)
+        if self.crop_encoder_name == "cnn":
+            self.crop = CropEncoder(48)
+        elif self.crop_encoder_name == "geovt":
+            self.crop = GeoVerticalTrackEncoder(48)
+        else:
+            raise ValueError(f"unknown crop_encoder={crop_encoder!r}")
         self.camera_embedding = nn.Embedding(camera_count, 12)
         self.camera_context = nn.Sequential(nn.Linear(13 + self.camera_geometry_dim, 16), nn.ReLU(inplace=True))
         self.fusion = nn.Sequential(nn.Linear(48 + 48 + 16, embedding_dim), nn.ReLU(inplace=True))

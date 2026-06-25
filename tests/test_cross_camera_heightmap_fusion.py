@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tools.cross_camera_heightmap_fusion_core import (
     CrossCameraFusionRanker,
+    GeoVerticalTrackEncoder,
     camera_height_m,
     filter_labeled_rows,
     filter_strict_no_train_overlap,
@@ -81,6 +82,40 @@ class CrossCameraFusionTest(unittest.TestCase):
                 model.compare_encoded(a, b),
             )
         )
+
+    def test_geo_vertical_track_encoder_accepts_track_crops_and_backpropagates(self) -> None:
+        encoder = GeoVerticalTrackEncoder(out_dim=24)
+        crops = torch.randn(3, 5, 1, 128, 64, requires_grad=True)
+
+        encoded = encoder(crops)
+        loss = encoded.square().mean()
+        loss.backward()
+
+        self.assertEqual(encoded.shape, (3, 24))
+        self.assertIsNotNone(crops.grad)
+        self.assertGreater(float(crops.grad.abs().sum().item()), 0.0)
+
+    def test_geovt_ranker_encodes_video_level_track_crops(self) -> None:
+        model = CrossCameraFusionRanker(camera_count=2, crop_encoder="geovt")
+        tabular = torch.randn(2, 9)
+        crops = torch.randn(2, 4, 1, 128, 64)
+        camera_index = torch.tensor([0, 1], dtype=torch.long)
+        camera_height = torch.tensor([2.5, 3.5], dtype=torch.float32)
+
+        encoded = model.encode(tabular, crops, camera_index, camera_height)
+
+        self.assertEqual(encoded.shape, (2, model.embedding_dim))
+
+    def test_geovt_ranker_encodes_frame_level_crops_for_track_consistency(self) -> None:
+        model = CrossCameraFusionRanker(camera_count=2, crop_encoder="geovt")
+        tabular = torch.randn(3, 9)
+        crops = torch.randn(3, 1, 128, 64)
+        camera_index = torch.tensor([0, 1, 0], dtype=torch.long)
+        camera_height = torch.tensor([2.5, 3.5, 2.5], dtype=torch.float32)
+
+        encoded = model.encode(tabular, crops, camera_index, camera_height)
+
+        self.assertEqual(encoded.shape, (3, model.embedding_dim))
 
     def test_score_identity_consistency_loss_backpropagates(self) -> None:
         model = CrossCameraFusionRanker(camera_count=2)

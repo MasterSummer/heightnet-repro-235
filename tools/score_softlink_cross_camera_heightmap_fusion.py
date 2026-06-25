@@ -41,18 +41,42 @@ def _load_model(checkpoint_path: Path, device: torch.device):
         raise ValueError(f"{checkpoint_path}: feature schema mismatch")
     camera_vocab = {str(key): int(value) for key, value in checkpoint["camera_vocab"].items()}
     camera_geometry_dim = int(checkpoint.get("camera_geometry_dim", 0) or 0)
-    model = CrossCameraFusionRanker(camera_count=len(camera_vocab), embedding_dim=int(checkpoint["embedding_dim"]), camera_geometry_dim=camera_geometry_dim)
+    model = CrossCameraFusionRanker(
+        camera_count=len(camera_vocab),
+        embedding_dim=int(checkpoint["embedding_dim"]),
+        camera_geometry_dim=camera_geometry_dim,
+        crop_encoder=str(checkpoint.get("crop_encoder", "cnn")),
+    )
     model.load_state_dict(checkpoint["model_state_dict"])
     model.to(device).eval()
     return model, camera_vocab, np.asarray(checkpoint["mu"], dtype=np.float32), np.asarray(checkpoint["sd"], dtype=np.float32), checkpoint
 
 
-def _encode_candidate(model, candidate: dict, camera_vocab: dict[str, int], mu: np.ndarray, sd: np.ndarray, device: torch.device, geometry_config: dict | None = None) -> torch.Tensor:
+def _encode_candidate(
+    model,
+    candidate: dict,
+    camera_vocab: dict[str, int],
+    mu: np.ndarray,
+    sd: np.ndarray,
+    device: torch.device,
+    checkpoint: dict,
+    geometry_config: dict | None = None,
+) -> torch.Tensor:
     camera_id = str(candidate["camera_id"])
     if camera_id not in camera_vocab:
         raise ValueError(f"unknown camera_id={camera_id!r}")
     frames = load_npz_frames(candidate["expected_npz_path"])
     tabular, crop = frames.aggregate()
+    crop_encoder = str(checkpoint.get("crop_encoder", "cnn"))
+    encoder_track_frames = int(checkpoint.get("encoder_track_frames", 1) or 1)
+    if crop_encoder == "geovt":
+        if encoder_track_frames <= 1 or frames.count == 1:
+            indices = [0]
+        else:
+            indices = np.linspace(0, frames.count - 1, num=encoder_track_frames, dtype=np.int64).astype(int).tolist()
+        crop_tensor = torch.tensor(frames.crops[indices][None], dtype=torch.float32, device=device)
+    else:
+        crop_tensor = torch.tensor(crop[None], dtype=torch.float32, device=device)
     extra = []
     if geometry_config and geometry_config.get("enabled"):
         kwargs = {
@@ -67,7 +91,7 @@ def _encode_candidate(model, candidate: dict, camera_vocab: dict[str, int], mu: 
     with torch.no_grad():
         return model.encode(
             torch.tensor(((tabular - mu) / sd)[None], dtype=torch.float32, device=device),
-            torch.tensor(crop[None], dtype=torch.float32, device=device),
+            crop_tensor,
             torch.tensor([camera_vocab[camera_id]], dtype=torch.long, device=device),
             torch.tensor([camera_height_m(camera_id)], dtype=torch.float32, device=device),
             *extra,
@@ -107,7 +131,7 @@ def main() -> None:
         detail["reasons"] = list(candidate.get("reasons") or [])
         if detail["status"] == "scored":
             try:
-                embedding = _encode_candidate(model, candidate, camera_vocab, mu, sd, device, geometry_config)
+                embedding = _encode_candidate(model, candidate, camera_vocab, mu, sd, device, checkpoint, geometry_config)
                 person_embeddings[str(candidate["person_id"])].append(embedding)
                 detail["embedding_contribution"] = 1
             except Exception as exc:

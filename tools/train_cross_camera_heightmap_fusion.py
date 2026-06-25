@@ -250,13 +250,34 @@ def _geometry_kwargs(args) -> dict:
     }
 
 
-def _sequence_tensors(rows: list[dict], camera_vocab: dict[str, int], mu: np.ndarray, sd: np.ndarray, device: torch.device, geometry_kwargs: dict | None = None):
+def _select_track_indices(frame_count: int, max_frames: int) -> list[int]:
+    if frame_count <= 0:
+        raise ValueError("track sampling requires at least one frame")
+    if max_frames <= 1 or frame_count == 1:
+        return [0]
+    return np.linspace(0, frame_count - 1, num=int(max_frames), dtype=np.int64).astype(int).tolist()
+
+
+def _sequence_tensors(
+    rows: list[dict],
+    camera_vocab: dict[str, int],
+    mu: np.ndarray,
+    sd: np.ndarray,
+    device: torch.device,
+    geometry_kwargs: dict | None = None,
+    crop_encoder: str = "cnn",
+    encoder_track_frames: int = 1,
+):
     tabular, crops, camera_index, camera_height, camera_geometry = [], [], [], [], []
     for row in rows:
         frames = load_npz_frames(row["npz_path"])
-        tab, crop = frames.aggregate()
+        tab, aggregate_crop = frames.aggregate()
         tabular.append((tab - mu) / sd)
-        crops.append(crop)
+        if crop_encoder == "geovt":
+            indices = _select_track_indices(frames.count, encoder_track_frames)
+            crops.append(frames.crops[indices])
+        else:
+            crops.append(aggregate_crop)
         camera_index.append(camera_vocab[row["camera_id"]])
         camera_height.append(row["camera_height_m"])
         if geometry_kwargs is not None:
@@ -416,19 +437,39 @@ def _height_regression_loss(
     return F.smooth_l1_loss(head(embeddings), targets)
 
 
-def _encode_rows(model, rows, camera_vocab, mu, sd, device, geometry_kwargs: dict | None = None):
-    tensors = _sequence_tensors(rows, camera_vocab, mu, sd, device, geometry_kwargs)
+def _encode_rows(
+    model,
+    rows,
+    camera_vocab,
+    mu,
+    sd,
+    device,
+    geometry_kwargs: dict | None = None,
+    crop_encoder: str = "cnn",
+    encoder_track_frames: int = 1,
+):
+    tensors = _sequence_tensors(rows, camera_vocab, mu, sd, device, geometry_kwargs, crop_encoder, encoder_track_frames)
     return model(*tensors)
 
 
-def _person_camera_records(model, rows, camera_vocab, mu, sd, device, geometry_kwargs: dict | None = None) -> list[dict]:
+def _person_camera_records(
+    model,
+    rows,
+    camera_vocab,
+    mu,
+    sd,
+    device,
+    geometry_kwargs: dict | None = None,
+    crop_encoder: str = "cnn",
+    encoder_track_frames: int = 1,
+) -> list[dict]:
     model.eval()
     grouped: dict[tuple[str, str], list[torch.Tensor]] = defaultdict(list)
     heights: dict[str, float] = {}
     with torch.no_grad():
         for start in range(0, len(rows), 128):
             batch = rows[start:start + 128]
-            encoded = _encode_rows(model, batch, camera_vocab, mu, sd, device, geometry_kwargs).cpu()
+            encoded = _encode_rows(model, batch, camera_vocab, mu, sd, device, geometry_kwargs, crop_encoder, encoder_track_frames).cpu()
             for row, embedding in zip(batch, encoded):
                 grouped[(row["person_id"], row["camera_id"])].append(embedding)
                 heights[row["person_id"]] = float(row["height_cm"])
@@ -438,13 +479,23 @@ def _person_camera_records(model, rows, camera_vocab, mu, sd, device, geometry_k
     ]
 
 
-def _video_records(model, rows, camera_vocab, mu, sd, device, geometry_kwargs: dict | None = None) -> list[dict]:
+def _video_records(
+    model,
+    rows,
+    camera_vocab,
+    mu,
+    sd,
+    device,
+    geometry_kwargs: dict | None = None,
+    crop_encoder: str = "cnn",
+    encoder_track_frames: int = 1,
+) -> list[dict]:
     model.eval()
     records: list[dict] = []
     with torch.no_grad():
         for start in range(0, len(rows), 128):
             batch = rows[start:start + 128]
-            encoded = _encode_rows(model, batch, camera_vocab, mu, sd, device, geometry_kwargs).cpu()
+            encoded = _encode_rows(model, batch, camera_vocab, mu, sd, device, geometry_kwargs, crop_encoder, encoder_track_frames).cpu()
             for row, embedding in zip(batch, encoded):
                 records.append(
                     {
@@ -521,13 +572,33 @@ def evaluate_video_level_records(compare_fn, score_fn, records: list[dict], devi
     }
 
 
-def evaluate(model, rows, camera_vocab, mu, sd, device, geometry_kwargs: dict | None = None) -> dict:
-    records = _video_records(model, rows, camera_vocab, mu, sd, device, geometry_kwargs)
+def evaluate(
+    model,
+    rows,
+    camera_vocab,
+    mu,
+    sd,
+    device,
+    geometry_kwargs: dict | None = None,
+    crop_encoder: str = "cnn",
+    encoder_track_frames: int = 1,
+) -> dict:
+    records = _video_records(model, rows, camera_vocab, mu, sd, device, geometry_kwargs, crop_encoder, encoder_track_frames)
     return evaluate_video_level_records(model.compare_encoded, lambda x: model.score(x).squeeze(1), records, device)
 
 
-def evaluate_person_camera_aggregated(model, rows, camera_vocab, mu, sd, device, geometry_kwargs: dict | None = None) -> dict:
-    records = _person_camera_records(model, rows, camera_vocab, mu, sd, device, geometry_kwargs)
+def evaluate_person_camera_aggregated(
+    model,
+    rows,
+    camera_vocab,
+    mu,
+    sd,
+    device,
+    geometry_kwargs: dict | None = None,
+    crop_encoder: str = "cnn",
+    encoder_track_frames: int = 1,
+) -> dict:
+    records = _person_camera_records(model, rows, camera_vocab, mu, sd, device, geometry_kwargs, crop_encoder, encoder_track_frames)
     metrics = evaluate_video_level_records(model.compare_encoded, lambda x: model.score(x).squeeze(1), records, device)
     metrics["sample_unit"] = "person_camera"
     metrics["person_camera_records"] = metrics.pop("video_records")
@@ -571,7 +642,12 @@ def train(args) -> dict:
     bucket_weights = _parse_bucket_weights(args.near_bucket_weights)
     geometry_kwargs = _geometry_kwargs(args) if args.use_camera_geometry else None
     camera_geometry_dim = CAMERA_GEOMETRY_FEATURE_DIM if args.use_camera_geometry else 0
-    model = CrossCameraFusionRanker(camera_count=len(camera_vocab), embedding_dim=args.embedding_dim, camera_geometry_dim=camera_geometry_dim).to(device)
+    model = CrossCameraFusionRanker(
+        camera_count=len(camera_vocab),
+        embedding_dim=args.embedding_dim,
+        camera_geometry_dim=camera_geometry_dim,
+        crop_encoder=args.crop_encoder,
+    ).to(device)
     height_head = HeightRegressionHead(args.embedding_dim).to(device) if args.lambda_height > 0 else None
     if ctx.distributed:
         ddp_kwargs = {
@@ -610,8 +686,8 @@ def train(args) -> dict:
         for _ in range(args.steps_per_epoch):
             left, right, _ = _pick_supervised_pairs(labeled["train"], args.batch_size, rng, args.min_hard_gap_cm)
             targets, pair_weights = _pair_targets_and_weights(left, right, args.pair_label_mode, args.pair_soft_temperature_cm, bucket_weights)
-            za = _encode_rows(model, left, camera_vocab, mu, sd, device, geometry_kwargs)
-            zb = _encode_rows(model, right, camera_vocab, mu, sd, device, geometry_kwargs)
+            za = _encode_rows(model, left, camera_vocab, mu, sd, device, geometry_kwargs, args.crop_encoder, args.encoder_track_frames)
+            zb = _encode_rows(model, right, camera_vocab, mu, sd, device, geometry_kwargs, args.crop_encoder, args.encoder_track_frames)
             logits = _compare_encoded_for_training(model, za, zb)
             rank_bce_loss = _weighted_bce_with_logits(logits, targets.to(device), pair_weights.to(device))
             left_scores = _score_for_training(model, za)
@@ -631,14 +707,14 @@ def train(args) -> dict:
             cross_terms = []
             for _ in range(args.consistency_batch_size):
                 a, ap, b = sample_cross_camera_triplet(labeled["train"], rng)
-                z_a = _encode_rows(model, [a], camera_vocab, mu, sd, device, geometry_kwargs)
-                z_ap = _encode_rows(model, [ap], camera_vocab, mu, sd, device, geometry_kwargs)
-                z_b = _encode_rows(model, [b], camera_vocab, mu, sd, device, geometry_kwargs)
+                z_a = _encode_rows(model, [a], camera_vocab, mu, sd, device, geometry_kwargs, args.crop_encoder, args.encoder_track_frames)
+                z_ap = _encode_rows(model, [ap], camera_vocab, mu, sd, device, geometry_kwargs, args.crop_encoder, args.encoder_track_frames)
+                z_b = _encode_rows(model, [b], camera_vocab, mu, sd, device, geometry_kwargs, args.crop_encoder, args.encoder_track_frames)
                 cross_terms.append(F.mse_loss(torch.sigmoid(_compare_encoded_for_training(model, z_a, z_b)), torch.sigmoid(_compare_encoded_for_training(model, z_ap, z_b))))
             cross_loss = torch.stack(cross_terms).mean()
             id_rows = _sample_identity_consistency_rows(labeled["train"], args.consistency_batch_size, rng)
             if id_rows and args.lambda_id_score > 0:
-                id_embeddings = _encode_rows(model, id_rows, camera_vocab, mu, sd, device, geometry_kwargs)
+                id_embeddings = _encode_rows(model, id_rows, camera_vocab, mu, sd, device, geometry_kwargs, args.crop_encoder, args.encoder_track_frames)
                 id_person_ids = [str(row["person_id"]) for row in id_rows]
             else:
                 id_embeddings = None
@@ -650,7 +726,17 @@ def train(args) -> dict:
                 id_group_count = 0
             same_camera_rows = _sample_same_camera_identity_consistency_rows(labeled["train"], args.consistency_batch_size, rng)
             if same_camera_rows and args.lambda_id_same_camera > 0:
-                same_camera_embeddings = _encode_rows(model, same_camera_rows, camera_vocab, mu, sd, device, geometry_kwargs)
+                same_camera_embeddings = _encode_rows(
+                    model,
+                    same_camera_rows,
+                    camera_vocab,
+                    mu,
+                    sd,
+                    device,
+                    geometry_kwargs,
+                    args.crop_encoder,
+                    args.encoder_track_frames,
+                )
                 same_camera_person_ids = [str(row["person_id"]) for row in same_camera_rows]
                 same_camera_ids = [str(row["camera_id"]) for row in same_camera_rows]
                 same_camera_id_loss, same_camera_id_group_count = _score_identity_consistency_loss_by_camera_for_training(
@@ -704,7 +790,7 @@ def train(args) -> dict:
         if ctx.distributed:
             dist.barrier()
         if ctx.is_main:
-            val_metrics = evaluate(model_ref, labeled["val"], camera_vocab, mu, sd, device, geometry_kwargs)
+            val_metrics = evaluate(model_ref, labeled["val"], camera_vocab, mu, sd, device, geometry_kwargs, args.crop_encoder, args.encoder_track_frames)
             item = {"epoch": epoch, **{key: value / args.steps_per_epoch for key, value in sums.items()}, "val": val_metrics}
             history.append(item)
             print("[EPOCH]", json.dumps(item, ensure_ascii=False), flush=True)
@@ -718,9 +804,33 @@ def train(args) -> dict:
     if best is None:
         raise RuntimeError("no best checkpoint was selected")
     model_ref.load_state_dict(best["state"])
-    primary_test = evaluate(model_ref, labeled["test"], camera_vocab, mu, sd, device, geometry_kwargs)
-    legacy_test = evaluate_person_camera_aggregated(model_ref, labeled["test"], camera_vocab, mu, sd, device, geometry_kwargs)
-    strict_metrics = evaluate_person_camera_aggregated(model_ref, strict_test, camera_vocab, mu, sd, device, geometry_kwargs) if strict_test else {"people": 0, "reason": "no strict test rows"}
+    primary_test = evaluate(model_ref, labeled["test"], camera_vocab, mu, sd, device, geometry_kwargs, args.crop_encoder, args.encoder_track_frames)
+    legacy_test = evaluate_person_camera_aggregated(
+        model_ref,
+        labeled["test"],
+        camera_vocab,
+        mu,
+        sd,
+        device,
+        geometry_kwargs,
+        args.crop_encoder,
+        args.encoder_track_frames,
+    )
+    strict_metrics = (
+        evaluate_person_camera_aggregated(
+            model_ref,
+            strict_test,
+            camera_vocab,
+            mu,
+            sd,
+            device,
+            geometry_kwargs,
+            args.crop_encoder,
+            args.encoder_track_frames,
+        )
+        if strict_test
+        else {"people": 0, "reason": "no strict test rows"}
+    )
     checkpoint = {
         "model_state_dict": best["state"],
         "camera_vocab": camera_vocab,
@@ -750,6 +860,8 @@ def train(args) -> dict:
         "split_overlap_summary": overlap,
         "person_split_json": args.person_split_json,
         "embedding_dim": args.embedding_dim,
+        "crop_encoder": args.crop_encoder,
+        "encoder_track_frames": args.encoder_track_frames,
         "camera_geometry_dim": camera_geometry_dim,
         "camera_geometry": {
             "enabled": bool(args.use_camera_geometry),
@@ -805,6 +917,8 @@ def main() -> None:
     parser.add_argument("--pair-label-mode", choices=("hard", "soft"), default="hard")
     parser.add_argument("--pair-soft-temperature-cm", type=float, default=3.0)
     parser.add_argument("--near-bucket-weights", default="lt3=1.0,3to5=1.0,5to8=1.0,ge8=1.0")
+    parser.add_argument("--crop-encoder", choices=("cnn", "geovt"), default="cnn")
+    parser.add_argument("--encoder-track-frames", type=int, default=8)
     parser.add_argument("--use-camera-geometry", action="store_true")
     parser.add_argument("--geometry-image-width", type=int, default=800)
     parser.add_argument("--geometry-image-height", type=int, default=600)

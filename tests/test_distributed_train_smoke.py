@@ -14,11 +14,56 @@ from tools.train_cross_camera_heightmap_fusion import (
     _pick_supervised_pairs,
     _sample_identity_consistency_rows,
     _sample_same_camera_identity_consistency_rows,
+    _sequence_tensors,
     evaluate_video_level_records,
 )
 
 
 class DistributedTrainSmokeTest(unittest.TestCase):
+    def test_sequence_tensors_preserve_track_crops_for_geovt_encoder(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            npz_path = Path(tmp) / "track.npz"
+            bbox = np.zeros((3, 7), dtype=np.float32)
+            stats = np.zeros((3, 8), dtype=np.float32)
+            crops = np.zeros((3, 1, 128, 64), dtype=np.float32)
+            crops[0] = 1.0
+            crops[1] = 2.0
+            crops[2] = 3.0
+            np.savez(
+                npz_path,
+                bbox_feats=bbox,
+                height_stats=stats,
+                heightmap_crops=crops,
+                valid_count=np.array([3], dtype=np.int32),
+                camera_id=np.array(["2d5_0"]),
+                video_stem=np.array(["track"]),
+            )
+            rows = [{"npz_path": str(npz_path), "camera_id": "2d5_0", "camera_height_m": 2.5}]
+
+            cnn_tensors = _sequence_tensors(
+                rows,
+                {"2d5_0": 0},
+                np.zeros(9, dtype=np.float32),
+                np.ones(9, dtype=np.float32),
+                torch.device("cpu"),
+                crop_encoder="cnn",
+            )
+            geovt_tensors = _sequence_tensors(
+                rows,
+                {"2d5_0": 0},
+                np.zeros(9, dtype=np.float32),
+                np.ones(9, dtype=np.float32),
+                torch.device("cpu"),
+                crop_encoder="geovt",
+                encoder_track_frames=4,
+            )
+
+        self.assertEqual(tuple(cnn_tensors[1].shape), (1, 1, 128, 64))
+        self.assertEqual(tuple(geovt_tensors[1].shape), (1, 4, 1, 128, 64))
+        self.assertEqual(geovt_tensors[1][0, :, 0, 0, 0].tolist(), [1.0, 1.0, 2.0, 3.0])
+
     def test_world_size_one_uses_non_distributed_context(self) -> None:
         ctx = _distributed_context_from_env("cpu", environ={"WORLD_SIZE": "1"})
 
