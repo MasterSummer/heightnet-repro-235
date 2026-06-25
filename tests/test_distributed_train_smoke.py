@@ -15,11 +15,16 @@ from tools.train_cross_camera_heightmap_fusion import (
     _sample_identity_consistency_rows,
     _sample_same_camera_identity_consistency_rows,
     _sequence_tensors,
+    _select_track_indices,
     evaluate_video_level_records,
 )
 
 
 class DistributedTrainSmokeTest(unittest.TestCase):
+    def test_select_track_indices_repeats_single_frame_to_fixed_track_length(self) -> None:
+        self.assertEqual(_select_track_indices(frame_count=1, max_frames=4), [0, 0, 0, 0])
+        self.assertEqual(_select_track_indices(frame_count=3, max_frames=4), [0, 0, 1, 2])
+
     def test_sequence_tensors_preserve_track_crops_for_geovt_encoder(self) -> None:
         import tempfile
 

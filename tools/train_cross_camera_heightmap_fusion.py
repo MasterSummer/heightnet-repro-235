@@ -253,8 +253,10 @@ def _geometry_kwargs(args) -> dict:
 def _select_track_indices(frame_count: int, max_frames: int) -> list[int]:
     if frame_count <= 0:
         raise ValueError("track sampling requires at least one frame")
-    if max_frames <= 1 or frame_count == 1:
+    if max_frames <= 1:
         return [0]
+    if frame_count == 1:
+        return [0] * int(max_frames)
     return np.linspace(0, frame_count - 1, num=int(max_frames), dtype=np.int64).astype(int).tolist()
 
 

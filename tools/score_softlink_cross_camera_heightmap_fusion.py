@@ -70,8 +70,10 @@ def _encode_candidate(
     crop_encoder = str(checkpoint.get("crop_encoder", "cnn"))
     encoder_track_frames = int(checkpoint.get("encoder_track_frames", 1) or 1)
     if crop_encoder == "geovt":
-        if encoder_track_frames <= 1 or frames.count == 1:
+        if encoder_track_frames <= 1:
             indices = [0]
+        elif frames.count == 1:
+            indices = [0] * encoder_track_frames
         else:
             indices = np.linspace(0, frames.count - 1, num=encoder_track_frames, dtype=np.int64).astype(int).tolist()
         crop_tensor = torch.tensor(frames.crops[indices][None], dtype=torch.float32, device=device)
