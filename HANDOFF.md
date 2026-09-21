@@ -1,43 +1,43 @@
-# HeightNet Repro 235 Handoff
+# HeightNet 235 服务器交接说明
 
-This repository is the active experiment code for video-level height ranking on server `235`.
+本仓库是服务器 `235` 上用于视频级身高排序实验的当前代码仓库。
 
-## Ownership Model
+## 工作方式
 
-- Edit code locally first.
-- Sync code to server `235`.
-- Run training/evaluation experiments on server `235`.
-- Keep generated data, checkpoints, and HTML audits out of Git.
+- 先在本地修改代码。
+- 将代码同步到服务器 `235`。
+- 在服务器 `235` 上运行训练和评估实验。
+- 生成数据、模型权重和 HTML 审查结果不提交到 Git。
 
-Server details:
+服务器信息：
 
 ```text
-host: gait-server-235
-user: zyding
-remote repo: /home/zyding/height/heightnet_repro
-default data root: /home/zyding/data
+主机别名：gait-server-235
+用户：zyding
+远程仓库目录：/home/zyding/height/heightnet_repro
+默认数据目录：/home/zyding/data
 ```
 
-Local mirror used for Git handoff:
+用于 Git 交接的本地镜像：
 
 ```text
 /Users/yiding/code/gait/heightnet-repro-235
 origin: https://github.com/MasterSummer/heightnet-repro-235.git
 ```
 
-The broader local workspace also has `/Users/yiding/code/gait/height/heightnet_repro`. Treat that as a development checkout with drift from this 235 mirror.
+本地工作区中另有 `/Users/yiding/code/gait/height/heightnet_repro`。该目录属于开发副本，可能与本仓库的 235 镜像存在差异。需要交接或推送服务器实验代码时，以本仓库为准。
 
-## Metric Policy
+## 评估口径
 
-Use video-level evaluation by default: each video is one independent sample.
+默认使用视频级评估：每个视频作为一个独立样本。
 
-Do not use person-camera aggregation or person-level aggregation as the primary metric. If an older aggregation-based result is reported for comparison, label it as non-primary.
+主指标不得将视频聚合为 person-camera 样本，也不得将视频聚合为 person 样本。若为了和历史结果对比而报告聚合指标，必须明确标注为非主指标（non-primary）。
 
-Use person-disjoint train/validation/test splits when judging model quality.
+评估模型质量时，训练集、验证集和测试集应使用按人员划分的 person-disjoint split，保证同一人员不会跨集合出现。
 
-## Environment Setup
+## 环境配置
 
-On server `235`:
+在服务器 `235` 上执行：
 
 ```bash
 ssh gait-server-235
@@ -49,7 +49,7 @@ pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-For GPU training, install the PyTorch CUDA build that matches the server driver if the generic `pip install -r requirements.txt` pulls a CPU build. Check with:
+如果通用的 `pip install -r requirements.txt` 安装成了 CPU 版本，进行 GPU 训练前需要根据服务器驱动安装匹配的 PyTorch CUDA 版本。检查环境：
 
 ```bash
 python - <<'PY'
@@ -60,27 +60,27 @@ print(torch.cuda.device_count())
 PY
 ```
 
-Depth-Anything-V2 is expected outside this repo:
+Depth-Anything-V2 默认位于仓库外部：
 
 ```text
 /home/zyding/height/Depth-Anything-V2
 /home/zyding/height/Depth-Anything-V2/checkpoints/depth_anything_v2_vits.pth
 ```
 
-YOLO weights may be referenced as `yolo26n.pt` or another local `.pt` file. Put weights in a stable server path and pass `--model` explicitly.
+YOLO 权重可以使用 `yolo26n.pt` 或其他本地 `.pt` 文件。建议将权重放在固定的服务器路径，并通过 `--model` 明确传入。
 
-## Local To Server Sync
+## 本地同步到服务器
 
-From the local workspace root:
+在本地工作区根目录执行：
 
 ```bash
 /Users/yiding/code/gait/scripts/sync_heightnet_to_235.sh --dry-run
 /Users/yiding/code/gait/scripts/sync_heightnet_to_235.sh
 ```
 
-The sync script excludes generated outputs such as `runs/`, `remote_runs/`, `data/`, caches, `.npz`, `.npy`, checkpoints, and logs. It does not delete server-only files.
+同步脚本会排除 `runs/`、`remote_runs/`、`data/`、缓存、`.npz`、`.npy`、模型权重和日志等生成内容，不会删除服务器端专有文件。
 
-After syncing:
+同步后检查服务器工作区：
 
 ```bash
 ssh gait-server-235
@@ -88,11 +88,11 @@ cd /home/zyding/height/heightnet_repro
 git status --short
 ```
 
-## Current Recommended Pipeline
+## 当前推荐流程
 
-The current handoff flow is for yolo26 bbox generation, NPZ conversion with exact bbox matching/filtering, crop quality audit, and cross-camera heightmap fusion training.
+当前交接流程包括：生成 yolo26 检测框 JSON、使用精确匹配和过滤条件转换 NPZ、审查裁剪质量，以及训练跨摄像头 heightmap fusion 模型。
 
-### 1. Generate YOLO bbox JSONs
+### 1. 生成 YOLO 检测框 JSON
 
 ```bash
 cd /home/zyding/height/heightnet_repro
@@ -110,23 +110,23 @@ CUDA_VISIBLE_DEVICES=0 torchrun --standalone --nproc_per_node=1 \
   --min-detections 5
 ```
 
-The output JSON name must match:
+输出 JSON 文件名必须符合：
 
 ```text
 <person_id>_<video_stem>.json
 ```
 
-`tools/convert_all_to_npz.py` defaults to exact matching and will reject missing exact JSONs unless `--allow-parsing-fallback` is passed.
+`tools/convert_all_to_npz.py` 默认使用精确匹配。如果找不到对应的精确 JSON，会直接拒绝处理；只有明确需要兼容旧行为时，才传入 `--allow-parsing-fallback`。
 
-### 2. Convert videos to NPZ features
+### 2. 将视频转换为 NPZ 特征
 
-Recommended filtered feature root:
+推荐的过滤后特征目录：
 
 ```text
 /home/zyding/height/jianzhi_2511_sequence/features_yolo26_bbox_filtered_h008_w002_s025_min8
 ```
 
-Example:
+示例：
 
 ```bash
 cd /home/zyding/height/heightnet_repro
@@ -148,15 +148,15 @@ CUDA_VISIBLE_DEVICES=0 python tools/convert_all_to_npz.py \
   --overwrite-summary
 ```
 
-Important behavior:
+重要行为：
 
-- Default `--exact-parsing-only` prevents accidental fallback to another video.
-- `--compact-valid-frames` stores only bbox-matched rows, so `valid_count == bbox_feats.shape[0] == heightmap_crops.shape[0]`.
-- Without `--compact-valid-frames`, the converter keeps uniform sampled frames and uses zero placeholders for missing bbox rows.
+- 默认启用 `--exact-parsing-only`，防止误用其他视频的检测结果。
+- `--compact-valid-frames` 只保存与检测框匹配的帧，因此 `valid_count == bbox_feats.shape[0] == heightmap_crops.shape[0]`。
+- 不使用 `--compact-valid-frames` 时，转换器保留均匀采样的帧；缺少检测框的行用全零占位。
 
-### 3. Validate NPZ schema
+### 3. 检查 NPZ 数据结构
 
-Quick audit:
+快速审查：
 
 ```bash
 python - <<'PY'
@@ -191,7 +191,7 @@ raise SystemExit(1 if bad else 0)
 PY
 ```
 
-### 4. Export crop quality review
+### 4. 导出裁剪质量审查结果
 
 ```bash
 python tools/export_cross_camera_crop_quality.py \
@@ -205,9 +205,9 @@ python tools/export_cross_camera_crop_quality.py \
   --seed 1
 ```
 
-Open `index.html` from the output directory to inspect crop panels.
+打开输出目录中的 `index.html`，检查各个裁剪面板。
 
-For targeted reviews:
+针对特定类别审查：
 
 ```bash
 python tools/export_targeted_crop_review.py \
@@ -217,9 +217,9 @@ python tools/export_targeted_crop_review.py \
   --seed 1
 ```
 
-### 5. Train cross-camera heightmap fusion
+### 5. 训练跨摄像头 heightmap fusion
 
-Single GPU smoke:
+单卡冒烟测试：
 
 ```bash
 python tools/train_cross_camera_heightmap_fusion.py \
@@ -234,7 +234,7 @@ python tools/train_cross_camera_heightmap_fusion.py \
   --seed 1
 ```
 
-4-GPU training:
+4 卡训练：
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --standalone --nproc_per_node=4 \
@@ -259,46 +259,46 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --standalone --nproc_per_node=4 \
   --seed 1
 ```
 
-Result file:
+结果文件：
 
 ```text
 runs/cross_camera_heightmap_fusion/<run_name>/results.json
 ```
 
-The script prints and writes both primary video-level metrics and explicitly named non-primary legacy aggregation metrics.
+脚本会同时输出并保存视频级主指标，以及明确标注为非主指标的历史聚合指标。
 
-### 6. One-shot helper
+### 6. 一键辅助脚本
 
-After NPZ conversion has been launched, this helper waits for conversion to finish, audits NPZs, exports crop review HTML, then starts the DDP experiment:
+启动 NPZ 转换后，可以使用以下脚本等待转换结束、检查 NPZ、导出裁剪审查 HTML，然后启动 DDP 实验：
 
 ```bash
 bash tools/run_yolo26_fixed_experiment_after_npz.sh
 ```
 
-Read and edit the path variables at the top of the script before reuse.
+重复使用前，先阅读并修改脚本顶部的路径变量。
 
-## Common Files
+## 常用文件
 
-- `tools/generate_yolo26_bboxes.py`: sample frames and write detector bbox JSONs.
-- `tools/convert_all_to_npz.py`: convert videos to sequence NPZ features.
-- `tools/train_cross_camera_heightmap_fusion.py`: current cross-camera fusion trainer.
-- `tools/cross_camera_heightmap_fusion_core.py`: NPZ loader, geometry helpers, shared model code.
-- `tools/export_cross_camera_crop_quality.py`: balanced crop quality HTML review.
-- `tools/export_strict_crop_overlay_audit.py`: overlay audit for filtered NPZ rows against source video/JSON.
-- `tools/repack_filtered_npz_by_crop_quality.py`: post-filter and repack existing NPZ roots.
-- `tests/test_convert_all_to_npz.py`: regression tests for exact bbox filtering and compact/non-compact NPZ behavior.
+- `tools/generate_yolo26_bboxes.py`：抽帧并写入检测框 JSON。
+- `tools/convert_all_to_npz.py`：将视频转换为序列 NPZ 特征。
+- `tools/train_cross_camera_heightmap_fusion.py`：当前跨摄像头 fusion 训练脚本。
+- `tools/cross_camera_heightmap_fusion_core.py`：NPZ 加载、几何处理和共享模型代码。
+- `tools/export_cross_camera_crop_quality.py`：导出平衡采样的裁剪质量 HTML 审查页。
+- `tools/export_strict_crop_overlay_audit.py`：将过滤后的 NPZ 行与原视频和 JSON 做叠加审查。
+- `tools/repack_filtered_npz_by_crop_quality.py`：对已有 NPZ 目录做后处理过滤和重新打包。
+- `tests/test_convert_all_to_npz.py`：精确检测框过滤、compact/non-compact NPZ 行为的回归测试。
 
-## Git Hygiene
+## Git 使用规范
 
-Commit code, configs, tests, and docs. Do not commit:
+应提交代码、配置、测试和文档。以下内容不要提交：
 
 - `runs/`
 - `remote_runs/`
-- `.npz`, `.npy`
-- checkpoints (`*.pt`, `*.pth`, `*.ckpt`)
-- logs and local virtualenvs
+- `.npz`、`.npy`
+- 模型权重（`*.pt`、`*.pth`、`*.ckpt`）
+- 日志和本地虚拟环境
 
-Before pushing:
+推送前执行：
 
 ```bash
 python -m pytest tests/test_convert_all_to_npz.py tests/test_cross_camera_heightmap_fusion.py tests/test_sequence_npz_feature_extraction.py -q
@@ -313,28 +313,28 @@ python -m py_compile \
   tools/repack_filtered_npz_by_crop_quality.py
 ```
 
-## Troubleshooting
+## 常见问题
 
-SSH timeout to 235:
+连接 235 超时：
 
 ```bash
 nc -vz -G 5 192.168.100.235 22
 ping -c 2 192.168.100.235
 ```
 
-If both fail, connect to the required internal network/VPN or check whether the server is up.
+如果两项都失败，请检查是否已连接必要的内网或 VPN，以及服务器是否在线。
 
-Missing exact parsing JSON:
+找不到精确匹配的 parsing JSON：
 
-- Check that `runs/yolo26_bbox_all/main_card_out/<person_id>_<video_stem>.json` exists.
-- Do not use `--allow-parsing-fallback` for full conversion unless you are intentionally reproducing legacy behavior.
+- 检查 `runs/yolo26_bbox_all/main_card_out/<person_id>_<video_stem>.json` 是否存在。
+- 除非有意复现旧流程，否则完整转换时不要使用 `--allow-parsing-fallback`。
 
-CUDA unavailable:
+CUDA 不可用：
 
-- Verify server driver and PyTorch CUDA build.
-- Reinstall PyTorch from the official CUDA wheel index matching the server.
+- 检查服务器驱动和 PyTorch CUDA 构建版本。
+- 根据服务器环境，从 PyTorch 官方 CUDA wheel 源重新安装匹配版本。
 
-Bad NPZ schema:
+NPZ 数据结构错误：
 
-- Ensure `--compact-valid-frames` was used for the filtered yolo26 feature root.
-- Re-run the schema audit in this document.
+- 确认过滤后的 yolo26 特征目录使用了 `--compact-valid-frames`。
+- 重新执行本说明中的 NPZ 数据结构检查命令。
