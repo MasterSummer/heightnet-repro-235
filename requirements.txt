@@ -1,11 +1,25 @@
-torch>=2.1.0
-torchvision>=0.16.0
-numpy>=1.24.0
-opencv-python>=4.8.0
-PyYAML>=6.0.1
-tqdm>=4.66.0
-pandas>=2.0.0
-Pillow>=10.0.0
-matplotlib>=3.7.0
-tensorboard>=2.14.0
-ultralytics>=8.3.0
+# Core numerical/data stack
+numpy>=1.24
+pandas>=2.0
+scipy>=1.10
+PyYAML>=6.0
+tqdm>=4.66
+Pillow>=10.0
+
+# Computer vision and plotting
+opencv-python>=4.8
+matplotlib>=3.7
+
+# PyTorch stack
+# Install a CUDA build that matches the target server before or instead of this
+# generic requirement, e.g. from https://pytorch.org/get-started/locally/.
+torch>=2.1
+torchvision>=0.16
+tensorboard>=2.14
+
+# Detection / segmentation helpers
+ultralytics>=8.3
+transformers>=4.40
+
+# Test runner
+pytest>=8.0

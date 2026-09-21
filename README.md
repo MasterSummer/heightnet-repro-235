@@ -1,5 +1,8 @@
 # HeightNet Reproduction Skeleton
 
+For the current server-235 handoff workflow, start with [HANDOFF.md](HANDOFF.md).
+The sections below describe the older HeightNet-style scaffold and are kept for reference.
+
 This folder provides a runnable HeightNet-style baseline centered on video-level pairwise ranking:
 
 1. Build train/val/test manifests directly from raw videos with person-level split.
