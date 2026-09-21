@@ -13,6 +13,7 @@ __pycache__/
 
 # Large/generated experiment artifacts
 runs/
+remote_runs/
 analysis_outputs/
 *.pt
 *.pth

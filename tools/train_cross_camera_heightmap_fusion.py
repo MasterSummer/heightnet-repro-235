@@ -897,7 +897,10 @@ def train(args) -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-root", default="/home/zyding/data")
-    parser.add_argument("--feature-root", default="/home/zyding/height/jianzhi_2511_sequence/features")
+    parser.add_argument(
+        "--feature-root",
+        default="/home/zyding/height/jianzhi_2511_sequence/features_yolo26_bbox_filtered_h008_w002_s025_min8",
+    )
     parser.add_argument("--out-dir", required=True)
     parser.add_argument("--person-split-json", default="")
     parser.add_argument("--epochs", type=int, default=300)

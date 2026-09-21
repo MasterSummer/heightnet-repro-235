@@ -134,6 +134,35 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--online-only", action="store_true")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--overwrite-summary", action="store_true")
+    p.add_argument(
+        "--exact-parsing-only",
+        dest="exact_parsing_only",
+        action="store_true",
+        help="Require an exact person_id + video_stem parsing JSON match; do not fall back to other videos.",
+    )
+    p.add_argument(
+        "--allow-parsing-fallback",
+        dest="exact_parsing_only",
+        action="store_false",
+        help="Allow legacy best-effort parsing JSON fallback. Unsafe for full-video conversion.",
+    )
+    p.set_defaults(exact_parsing_only=True)
+    p.add_argument(
+        "--compact-valid-frames",
+        action="store_true",
+        help="Store only frames with a matched bbox so valid_count equals the saved row count.",
+    )
+    p.add_argument("--min-bbox-score", type=float, default=-1.0, help="Drop bbox frames below this detector score.")
+    p.add_argument("--min-bbox-h-norm", type=float, default=0.0, help="Drop bbox frames with normalized height below this value.")
+    p.add_argument("--min-bbox-w-norm", type=float, default=0.0, help="Drop bbox frames with normalized width below this value.")
+    p.add_argument("--max-bbox-h-norm", type=float, default=1.0, help="Drop bbox frames with normalized height above this value.")
+    p.add_argument("--max-bbox-w-norm", type=float, default=1.0, help="Drop bbox frames with normalized width above this value.")
+    p.add_argument(
+        "--bbox-edge-margin-norm",
+        type=float,
+        default=0.0,
+        help="Drop bbox frames touching any image edge within this normalized margin.",
+    )
     return p.parse_args()
 
 
@@ -205,6 +234,11 @@ def choose_best_parsing_json(person_id: str, video_stem: str, parsing_index: dic
     return best_path
 
 
+def choose_exact_parsing_json(person_id: str, video_stem: str, parsing_root: Path) -> Path | None:
+    path = parsing_root / f"{person_id}_{video_stem}.json"
+    return path if path.exists() else None
+
+
 def build_frame_bbox_map(payload: Any) -> dict[int, dict[str, Any]]:
     frame_map: dict[int, dict[str, Any]] = {}
     if not isinstance(payload, dict):
@@ -244,6 +278,41 @@ def compute_bbox_features(bbox_xyxy: tuple[float, float, float, float], frame_w:
     x1, y1, x2, y2 = bbox_xyxy
     w = max(float(x2 - x1), 1.0)
     h = max(float(y2 - y1), 1.0)
+    cy = y1 + 0.5 * h
+    y2_clamped = min(max(float(y2), 0.0), float(frame_h))
+    rel_h = h / max(float(frame_h), 1.0)
+    rel_w = w / max(float(frame_w), 1.0)
+    area = (w * h) / max(float(frame_w * frame_h), 1.0)
+    feat = np.asarray(
+        [
+            rel_h,
+            rel_w,
+            -float(y1) / max(float(frame_h), 1.0),
+            y2_clamped / max(float(frame_h), 1.0),
+            cy / max(float(frame_h), 1.0),
+            area,
+            1.0,
+        ],
+        dtype=np.float32,
+    )
+    return feat
+
+
+def compute_bbox_features_with_score(
+    bbox_xyxy: tuple[float, float, float, float],
+    frame_w: int,
+    frame_h: int,
+    score: float,
+) -> np.ndarray:
+    feat = compute_bbox_features(bbox_xyxy, frame_w=frame_w, frame_h=frame_h)
+    feat[6] = float(score)
+    return feat
+
+
+def legacy_bbox_features(bbox_xyxy: tuple[float, float, float, float], frame_w: int, frame_h: int) -> np.ndarray:
+    x1, y1, x2, y2 = bbox_xyxy
+    w = max(float(x2 - x1), 1.0)
+    h = max(float(y2 - y1), 1.0)
     cx = x1 + 0.5 * w
     cy = y1 + 0.5 * h
     aspect = w / h
@@ -254,7 +323,7 @@ def compute_bbox_features(bbox_xyxy: tuple[float, float, float, float], frame_w:
             cx / max(float(frame_w), 1.0),
             cy / max(float(frame_h), 1.0),
             w / max(float(frame_w), 1.0),
-            h / max(float(frame_h), 1.0),
+            rel_h,
             aspect,
             rel_h,
             area,
@@ -371,6 +440,80 @@ def sample_frame_indices(num_frames: int, frames_per_video: int) -> list[int]:
             if len(out) >= frames_per_video:
                 break
     return sorted(out[:frames_per_video])
+
+
+def sample_frame_indices_from_bbox(
+    frame_bbox_map: dict[int, dict[str, Any]],
+    num_frames: int,
+    frames_per_video: int,
+) -> list[int]:
+    """Sample frames only from frames that have parsing bbox annotations."""
+    valid_indices = sorted(
+        int(idx)
+        for idx in frame_bbox_map.keys()
+        if 0 <= int(idx) < int(num_frames)
+    )
+    if not valid_indices:
+        return []
+    frames_per_video = max(1, min(int(frames_per_video), len(valid_indices)))
+    if frames_per_video == len(valid_indices):
+        return valid_indices
+    if frames_per_video == 1:
+        return [valid_indices[len(valid_indices) // 2]]
+    positions = np.linspace(0, len(valid_indices) - 1, num=frames_per_video)
+    out = [valid_indices[int(round(float(pos)))] for pos in positions]
+    return sorted(dict.fromkeys(out))
+
+
+def bbox_filter_reason(
+    entry: dict[str, Any],
+    frame_w: int,
+    frame_h: int,
+    args: argparse.Namespace,
+) -> str | None:
+    x1, y1, x2, y2 = [float(v) for v in entry["bbox_xyxy"]]
+    score = float(entry.get("score", 0.0))
+    bw = max(0.0, x2 - x1)
+    bh = max(0.0, y2 - y1)
+    w_norm = bw / max(float(frame_w), 1.0)
+    h_norm = bh / max(float(frame_h), 1.0)
+    if score < float(getattr(args, "min_bbox_score", -1.0)):
+        return "low_bbox_score"
+    if h_norm < float(getattr(args, "min_bbox_h_norm", 0.0)):
+        return "small_bbox_height"
+    if w_norm < float(getattr(args, "min_bbox_w_norm", 0.0)):
+        return "small_bbox_width"
+    if h_norm > float(getattr(args, "max_bbox_h_norm", 1.0)):
+        return "large_bbox_height"
+    if w_norm > float(getattr(args, "max_bbox_w_norm", 1.0)):
+        return "large_bbox_width"
+
+    edge = float(getattr(args, "bbox_edge_margin_norm", 0.0))
+    if edge > 0.0:
+        left = x1 / max(float(frame_w), 1.0)
+        right = 1.0 - x2 / max(float(frame_w), 1.0)
+        top = y1 / max(float(frame_h), 1.0)
+        bottom = 1.0 - y2 / max(float(frame_h), 1.0)
+        if min(left, right, top, bottom) < edge:
+            return "edge_clipped_bbox"
+    return None
+
+
+def filter_frame_bbox_map(
+    frame_bbox_map: dict[int, dict[str, Any]],
+    frame_w: int,
+    frame_h: int,
+    args: argparse.Namespace,
+) -> tuple[dict[int, dict[str, Any]], dict[str, int]]:
+    kept: dict[int, dict[str, Any]] = {}
+    reasons: dict[str, int] = {}
+    for frame_idx, entry in frame_bbox_map.items():
+        reason = bbox_filter_reason(entry, frame_w=frame_w, frame_h=frame_h, args=args)
+        if reason is None:
+            kept[frame_idx] = entry
+        else:
+            reasons[reason] = reasons.get(reason, 0) + 1
+    return kept, reasons
 
 
 def read_video_frame(cap: cv2.VideoCapture, frame_idx: int) -> np.ndarray | None:
@@ -503,6 +646,13 @@ def process_video(
     if not video_path.exists():
         return "failed", {"video": record.video_path, "reason": "missing_video"}
 
+    if args.exact_parsing_only:
+        parsing_path = choose_exact_parsing_json(record.person_id, record.video_stem, Path(args.parsing_json_root))
+        if parsing_path is None:
+            return "missing_parsing", {"video": record.video_path, "reason": "missing_exact_parsing_json"}
+    else:
+        parsing_path = choose_best_parsing_json(record.person_id, record.video_stem, parsing_index)
+
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         return "failed", {"video": record.video_path, "reason": "open_failed"}
@@ -520,19 +670,30 @@ def process_video(
         if bg_depth is None:
             return "missing_bg", {"video": record.video_path, "camera_id": record.camera_id}
 
-        parsing_path = choose_best_parsing_json(record.person_id, record.video_stem, parsing_index)
         frame_bbox_map: dict[int, dict[str, Any]] = {}
         if parsing_path is not None and parsing_path.exists():
             frame_bbox_map = parsing_cache.frame_bbox_map(parsing_path)
+        frame_bbox_map, filtered_bbox_reasons = filter_frame_bbox_map(
+            frame_bbox_map,
+            frame_w=frame_w,
+            frame_h=frame_h,
+            args=args,
+        )
 
         mode = video_mode(record, {p.strip() for p in args.cache_persons if str(p).strip()})
-        sample_indices = sample_frame_indices(total_frames, args.frames_per_video)
+        reference_sample_indices = sample_frame_indices(total_frames, args.frames_per_video)
+        if args.compact_valid_frames:
+            sample_indices = sample_frame_indices_from_bbox(frame_bbox_map, total_frames, args.frames_per_video)
+            if not sample_indices:
+                sample_indices = reference_sample_indices
+        else:
+            sample_indices = reference_sample_indices
         bbox_feats = []
         height_stats = []
         heightmap_crops = []
         valid_count = 0
         corrupt_depth = 0
-        missing_bbox = 0
+        missing_bbox = sum(1 for idx in reference_sample_indices if int(idx) not in frame_bbox_map)
         bad_frame = 0
 
         for frame_idx in sample_indices:
@@ -557,14 +718,20 @@ def process_video(
             height, valid = depth_to_height_np(depth, bg_depth, record.camera_height_m)
             bbox_entry = frame_bbox_map.get(int(frame_idx))
             if bbox_entry is None:
-                missing_bbox += 1
+                if args.compact_valid_frames:
+                    continue
                 bbox = (0.0, 0.0, float(frame_w), float(frame_h))
                 bbox_feat = np.zeros((7,), dtype=np.float32)
                 stats = np.zeros((8,), dtype=np.float32)
                 crop = np.zeros((1, 128, 64), dtype=np.float32)
             else:
                 bbox = bbox_entry["bbox_xyxy"]
-                bbox_feat = compute_bbox_features(bbox, frame_w=frame_w, frame_h=frame_h)
+                bbox_feat = compute_bbox_features_with_score(
+                    bbox,
+                    frame_w=frame_w,
+                    frame_h=frame_h,
+                    score=float(bbox_entry.get("score", 0.0)),
+                )
                 stats = compute_height_stats(height, valid, bbox)
                 crop = extract_heightmap_crop(height, bbox, out_h=128, out_w=64)
                 valid_count += 1
@@ -585,7 +752,7 @@ def process_video(
             "bbox_feats": np.stack(bbox_feats, axis=0).astype(np.float32),
             "height_stats": np.stack(height_stats, axis=0).astype(np.float32),
             "heightmap_crops": np.stack(heightmap_crops, axis=0).astype(np.float32),
-            "valid_count": np.asarray([int(valid_count)], dtype=np.int32),
+            "valid_count": np.asarray([int(len(bbox_feats) if args.compact_valid_frames else valid_count)], dtype=np.int32),
             "camera_id": np.asarray([record.camera_id]),
             "video_stem": np.asarray([record.video_stem]),
         }
@@ -600,6 +767,8 @@ def process_video(
                 "frames_requested": len(sample_indices),
                 "valid_count": int(valid_count),
                 "missing_bbox_frames": int(missing_bbox),
+                "filtered_bbox_frames": int(sum(filtered_bbox_reasons.values())),
+                "filtered_bbox_reasons": filtered_bbox_reasons,
                 "corrupt_depth_frames": int(corrupt_depth),
                 "bad_frame_count": int(bad_frame),
                 "output": str(output_path),
