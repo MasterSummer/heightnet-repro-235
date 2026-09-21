@@ -11,7 +11,7 @@ opencv-python>=4.8
 matplotlib>=3.7
 
 # PyTorch 相关依赖
-# 在目标服务器上应优先安装与驱动匹配的 CUDA 版本；通用版本仅作为兜底。
+# 在目标环境中应优先安装与驱动匹配的 CUDA 版本；通用版本仅作为兜底。
 # 安装说明：https://pytorch.org/get-started/locally/
 torch>=2.1
 torchvision>=0.16
